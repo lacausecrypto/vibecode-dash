@@ -198,6 +198,43 @@ function addUtcDays(dateIso: string, delta: number): string {
   return toIsoDate(date);
 }
 
+/**
+ * Returns the most recent date in `series` that isn't a "pending" zero.
+ *
+ * Why this exists: GitHub traffic is aggregated at UTC midnight with ~24h
+ * latency. A sync run mid-day writes a `today` row at 0 because GitHub hasn't
+ * aggregated yet. KPIs anchored naively on `max(date <= today)` then flash
+ * `-100%` and promote the wrong repo as "top" until GitHub catches up.
+ *
+ * When `skipPendingToday` is set and today's summed value is zero while a
+ * prior non-zero day exists, fall back to the last day we actually have data
+ * for. Contribution-style series (zero-commit days are genuinely zero, not
+ * pending) should pass `skipPendingToday = false`.
+ */
+function latestRealDate(
+  series: Iterable<{ date: string; value: number }>,
+  todayIso: string,
+  skipPendingToday: boolean,
+): string {
+  let maxDate = '';
+  let todaySum = 0;
+  let fallback = '';
+  for (const row of series) {
+    if (row.date > todayIso) continue;
+    if (row.date > maxDate) maxDate = row.date;
+    if (row.date === todayIso) {
+      todaySum += row.value;
+    } else if (row.value > 0 && row.date > fallback) {
+      fallback = row.date;
+    }
+  }
+  const latest = maxDate || todayIso;
+  if (skipPendingToday && latest === todayIso && todaySum === 0 && fallback) {
+    return fallback;
+  }
+  return latest;
+}
+
 function buildDateWindow(endDateIso: string, days: number): string[] {
   const startDate = addUtcDays(endDateIso, -(days - 1));
   const out: string[] = [];
@@ -478,13 +515,20 @@ export default function GithubRoute() {
     if (rows.length === 0) {
       return null;
     }
-    const todayIso = new Date().toISOString().slice(0, 10);
-    const latest =
-      rows.reduce((max, row) => (row.date <= todayIso && row.date > max ? row.date : max), '') ||
-      todayIso;
-    const endMs = new Date(`${latest}T00:00:00Z`).getTime();
-    const startMs = endMs - (deltaWindowDays - 1) * 86400 * 1000;
-    const startIso = new Date(startMs).toISOString().slice(0, 10);
+    const todayIso = toIsoDate(new Date());
+    // Anchor on the last day with real traffic so a freshly-synced, still-
+    // aggregating today doesn't surface a zero-everywhere "top" repo.
+    const perDate = new Map<string, number>();
+    for (const row of rows) {
+      const cur = perDate.get(row.date) || 0;
+      perDate.set(row.date, cur + Number(row.viewsCount || 0) + Number(row.clonesCount || 0));
+    }
+    const latest = latestRealDate(
+      [...perDate.entries()].map(([date, value]) => ({ date, value })),
+      todayIso,
+      true,
+    );
+    const startIso = addUtcDays(latest, -(deltaWindowDays - 1));
     const per = new Map<string, { views: number; clones: number }>();
     for (const row of rows) {
       if (row.date < startIso || row.date > latest) continue;
@@ -499,58 +543,31 @@ export default function GithubRoute() {
       clones: v.clones,
       total: v.views + v.clones,
     }));
-    entries.sort((a, b) => b.total - a.total);
-    return entries[0] || null;
+    // Drop repos with zero traffic: a 1-day window where every repo is zero
+    // would still promote entries[0] as the "top", which is misleading.
+    const nonZero = entries.filter((e) => e.total > 0);
+    nonZero.sort((a, b) => b.total - a.total);
+    return nonZero[0] || null;
   }, [trafficSeries, deltaWindowDays]);
 
   const dailyDeltas = useMemo(() => {
-    const addDays = (iso: string, delta: number) => {
-      const d = new Date(`${iso}T00:00:00Z`);
-      d.setUTCDate(d.getUTCDate() + delta);
-      return d.toISOString().slice(0, 10);
-    };
-
     const sumRange = (series: Array<{ date: string; count: number }>, from: string, to: string) =>
       series.reduce((acc, row) => (row.date >= from && row.date <= to ? acc + row.count : acc), 0);
 
-    // Anchor windows on each series' latest *real* date (≤ today) so "Jour /
-    // Semaine / Mois" reste significatif même quand GitHub publie avec 24-48h
-    // de retard (traffic). Clamp à today: heatmap.days est paddé jusqu'au 31
-    // décembre avec count=0, donc sans clamp le latest tomberait sur Dec 31.
-    //
-    // `skipPendingToday` is set when a zero row for today is likely *pending*
-    // aggregation rather than a real zero (GitHub traffic is aggregated at
-    // UTC midnight + ~24h latency; a manual sync run mid-day inserts a
-    // today-row at 0 that flashes -100% until GitHub catches up). Falls
-    // back to the most recent non-zero day so the "1J" KPI stays meaningful.
-    // Not applied to the contribution heatmap — a zero-contrib day is a
-    // genuine zero, not pending data.
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = toIsoDate(new Date());
     const computeDelta = (
       series: Array<{ date: string; count: number }>,
       skipPendingToday = false,
     ) => {
-      const maxDateSeen = series.reduce(
-        (max, row) => (row.date <= todayIso && row.date > max ? row.date : max),
-        '',
+      const latest = latestRealDate(
+        series.map((r) => ({ date: r.date, value: r.count })),
+        todayIso,
+        skipPendingToday,
       );
-      let latest = maxDateSeen || todayIso;
-
-      if (skipPendingToday && latest === todayIso) {
-        const todayRow = series.find((r) => r.date === todayIso);
-        if (todayRow && todayRow.count === 0) {
-          const fallback = series.reduce(
-            (max, row) => (row.date < todayIso && row.count > 0 && row.date > max ? row.date : max),
-            '',
-          );
-          if (fallback) latest = fallback;
-        }
-      }
-
       const currentEnd = latest;
-      const currentStart = addDays(latest, -(deltaWindowDays - 1));
-      const previousEnd = addDays(currentStart, -1);
-      const previousStart = addDays(previousEnd, -(deltaWindowDays - 1));
+      const currentStart = addUtcDays(latest, -(deltaWindowDays - 1));
+      const previousEnd = addUtcDays(currentStart, -1);
+      const previousStart = addUtcDays(previousEnd, -(deltaWindowDays - 1));
 
       const current = sumRange(series, currentStart, currentEnd);
       const previous = sumRange(series, previousStart, previousEnd);
