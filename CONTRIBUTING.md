@@ -5,7 +5,7 @@ Thanks for looking at vibecode-dash. It's a solo-dev tool built for solo devs, s
 ## Ground rules
 
 - **Local-first.** If your change introduces a network call to a SaaS, an account, telemetry, or any remote state, it probably won't land. Exceptions: talking to GitHub's API (the app already does), hitting public package registries for the Competitor Radar.
-- **CLI over SDK.** Provider integrations (Claude, Codex, future LLMs) are done by spawning the official CLI — not by importing their SDK. This is a hard constraint, not a preference. See [plan.md](plan.md) and [CLAUDE.md](CLAUDE.md).
+- **CLI over SDK.** Provider integrations (Claude, Codex, future LLMs) are done by spawning the official CLI — not by importing their SDK. This is a hard constraint, not a preference. See [CLAUDE.md](CLAUDE.md).
 - **127.0.0.1 only.** Never change the bind address or add a way to expose the server publicly.
 - **No secrets in the repo.** Keyring for runtime, `.env.example` for hints. The `data/` directory is user state and stays gitignored (except `.gitkeep` and `settings.example.json`).
 

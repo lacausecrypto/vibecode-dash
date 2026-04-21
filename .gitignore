@@ -28,3 +28,6 @@ secrets/
 .vscode/
 .idea/
 Thumbs.db
+
+# Internal planning docs (not for public tracking)
+plan.md

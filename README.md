@@ -248,7 +248,7 @@ Paths resolved through `node:os.homedir()` + `node:path.join`, no hardcoded sepa
 
 **Stack:** Bun 1.1+ · Hono 4 · React 19 · Vite 7 · Tailwind 4 · SQLite (`bun:sqlite`) · Zod 4. No LLM SDKs. Only CLIs, on purpose.
 
-See [plan.md](plan.md) for the implementation plan and [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for resource benchmarks (~340 ms cold start, ~60 MB RSS idle, 1.5 MB npm tarball).
+See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for resource benchmarks (~340 ms cold start, ~60 MB RSS idle, 1.5 MB npm tarball).
 
 ---
 
