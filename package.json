@@ -1,0 +1,77 @@
+{
+  "name": "vibecode-dash",
+  "version": "0.1.0",
+  "description": "Local-first dashboard for the vibe-coding era. Aggregates LLM CLI usage (claude, codex), GitHub, and an Obsidian vault into one 127.0.0.1 app — no cloud, no telemetry.",
+  "keywords": [
+    "vibe-coding",
+    "vibecode",
+    "claude",
+    "claude-code",
+    "codex",
+    "ccusage",
+    "llm",
+    "ai",
+    "dashboard",
+    "obsidian",
+    "local-first",
+    "self-hosted",
+    "bun",
+    "hono",
+    "sqlite"
+  ],
+  "homepage": "https://github.com/lacausecrypto/vibecode-dash#readme",
+  "bugs": {
+    "url": "https://github.com/lacausecrypto/vibecode-dash/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lacausecrypto/vibecode-dash.git"
+  },
+  "license": "MIT",
+  "author": "lacausecrypto",
+  "type": "module",
+  "bin": {
+    "vibecode-dash": "./bin/vibecode-dash.mjs"
+  },
+  "files": ["bin/", "dist/client/", "dist/server/index.js", "LICENSE", "README.md", "SECURITY.md"],
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c cyan,magenta \"bun run dev:server\" \"bun run dev:client\"",
+    "dev:server": "PORT=4318 bun --hot src/server/index.ts",
+    "dev:client": "vite --host 127.0.0.1 --port 4317 --strictPort",
+    "build": "bun run build:client && bun run build:server",
+    "build:client": "vite build",
+    "build:server": "bun build src/server/index.ts --outdir=dist/server --target=bun --minify --sourcemap=external",
+    "start": "bun run build && NODE_ENV=production bun dist/server/index.js",
+    "setup": "bun run scripts/setup.ts",
+    "migrate": "bun run scripts/migrate.ts",
+    "rescan": "bun run scripts/rescan-all.ts",
+    "lint": "biome check .",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src",
+    "pack:check": "bun pm pack --dry-run",
+    "prepublishOnly": "bun run typecheck && bun run lint && bun run test && bun run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@tailwindcss/vite": "^4.1.14",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.0.4",
+    "bun-types": "^1.3.12",
+    "concurrently": "^9.2.1",
+    "gray-matter": "^4.0.3",
+    "hono": "^4.10.1",
+    "marked": "^16.4.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.9.6",
+    "recharts": "^3.8.1",
+    "tailwindcss": "^4.1.14",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.10",
+    "zod": "^4.1.11"
+  }
+}

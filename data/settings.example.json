@@ -1,0 +1,32 @@
+{
+  "locale": "en",
+  "paths": {
+    "projectsRoots": ["~/projects"],
+    "vaultPath": "~/Documents/Obsidian",
+    "claudeConfigDir": "~/.claude",
+    "excludedProjects": []
+  },
+  "github": {
+    "username": ""
+  },
+  "schedules": {
+    "projectRescanMinutes": 30,
+    "githubSyncMinutes": 30,
+    "obsidianSyncMinutes": 10,
+    "usageSyncMinutes": 10
+  },
+  "subscriptions": {
+    "usdToEur": 0.93,
+    "claude": { "plan": "Max x20", "monthlyEur": 180 },
+    "codex": { "plan": "Pro x5", "monthlyEur": 100 }
+  },
+  "displayAliases": {},
+  "devEquivalent": {
+    "hourlyRateEur": 100,
+    "outputTokensPerHour": 2500
+  },
+  "billingHistory": {
+    "claude": [],
+    "codex": []
+  }
+}

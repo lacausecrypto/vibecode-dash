@@ -1,0 +1,2318 @@
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import {
+  Bar,
+  CartesianGrid,
+  ComposedChart,
+  Legend,
+  Line,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import { Heatmap } from '../components/Heatmap';
+import { ProjectsUsageLLM } from '../components/ProjectsUsageLLM';
+import { apiGet } from '../lib/api';
+import { type Locale, dateLocale, numberLocale, useTranslation } from '../lib/i18n';
+import { type BillingHistory, computeBillingCost } from '../lib/pricing';
+
+type CombinedDailyRow = {
+  date: string;
+  claudeInputTokens: number;
+  claudeOutputTokens: number;
+  claudeCacheCreateTokens: number;
+  claudeCacheReadTokens: number;
+  claudeTokens: number;
+  claudeCostUsd: number;
+  codexInputTokens: number;
+  codexCachedInputTokens: number;
+  codexOutputTokens: number;
+  codexReasoningOutputTokens: number;
+  codexTokens: number;
+  codexCostUsd: number;
+  totalTokens: number;
+  totalCostUsd: number;
+};
+
+type CombinedDailyResponse = {
+  rows: CombinedDailyRow[];
+  warnings?: {
+    claude?: string | null;
+    codex?: string | null;
+  };
+};
+
+type ProjectUsageRow = {
+  projectKey: string;
+  projectPath: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreate: number;
+  cacheRead: number;
+  totalTokens: number;
+  assistantMessages: number;
+  userMessages: number;
+  messageCount: number;
+  sessions: number;
+  avgOutputTokens: number;
+  cacheReuseRatio: number;
+  lastTs: number | null;
+  models: Array<{ model: string; messages: number; tokens: number }>;
+  tools: Array<{ name: string; count: number }>;
+};
+
+type ModelUsageRow = {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreate: number;
+  cacheRead: number;
+  totalTokens: number;
+  messages: number;
+};
+
+type HourDistributionRow = {
+  hour: number;
+  tokens: number;
+  messages: number;
+};
+
+type ToolUsageRow = {
+  name: string;
+  count: number;
+};
+
+type UsageMeta = {
+  generatedAt: number;
+  fromTs: number;
+  toTs: number;
+  filesScanned: number;
+  linesParsed: number;
+  assistantMessages: number;
+  userMessages: number;
+};
+
+type UsageResponse<T> = {
+  rows: T[];
+  meta: UsageMeta;
+};
+
+type ToolUsageResponse = {
+  rows: ToolUsageRow[];
+  meta: UsageMeta;
+  project: {
+    projectKey: string;
+    projectPath: string | null;
+    projectId: string | null;
+    projectName: string | null;
+  } | null;
+};
+
+type CodexProjectUsageRow = {
+  projectKey: string;
+  projectPath: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+  turns: number;
+  sessions: number;
+  cacheHitRatio: number;
+  lastTs: number | null;
+  models: Array<{ model: string; turns: number; tokens: number }>;
+  tools: ToolUsageRow[];
+};
+
+type CodexModelUsageRow = {
+  model: string;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+  turns: number;
+};
+
+type CodexHourDistributionRow = {
+  hour: number;
+  tokens: number;
+  turns: number;
+};
+
+type CodexUsageMeta = {
+  generatedAt: number;
+  fromTs: number;
+  toTs: number;
+  filesScanned: number;
+  linesParsed: number;
+  turns: number;
+  sessions: number;
+};
+
+type CodexUsageResponse<T> = {
+  rows: T[];
+  meta: CodexUsageMeta;
+};
+
+type CodexToolUsageResponse = {
+  rows: ToolUsageRow[];
+  meta: CodexUsageMeta;
+  project: {
+    projectKey: string;
+    projectPath: string | null;
+    projectId: string | null;
+    projectName: string | null;
+  } | null;
+};
+
+type CodexRateLimitsPayload = {
+  rateLimits: {
+    primary: { usedPercent: number; windowMinutes: number; resetsAt: number } | null;
+    secondary: { usedPercent: number; windowMinutes: number; resetsAt: number } | null;
+    planType: string | null;
+    observedAt: number;
+  } | null;
+  meta: CodexUsageMeta;
+};
+
+type ProjectRowLike = {
+  projectKey: string;
+  projectPath: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  totalTokens: number;
+};
+
+type TimeRange = '30d' | '90d' | 'all';
+type TokenLens = 'active' | 'all';
+type HeatmapSource = 'total' | 'claude' | 'codex';
+type HeatmapDayFilter = 'all' | 'weekday' | 'weekend';
+type HeatmapIntensityFilter = 'all' | 'p50' | 'p75';
+type HeatmapScale = 'linear' | 'log';
+type AnalyticsProvider = 'claude' | 'codex';
+
+type SubscriptionSettings = {
+  usdToEur: number;
+  claude: { plan: string; monthlyEur: number };
+  codex: { plan: string; monthlyEur: number };
+};
+
+type ChartRow = {
+  date: string;
+  claudeActiveTokens: number;
+  claudeCacheTokens: number;
+  claudeAllTokens: number;
+  codexActiveTokens: number;
+  codexCacheTokens: number;
+  codexAllTokens: number;
+  totalActiveTokens: number;
+  totalAllTokens: number;
+  claudeSelectedTokens: number;
+  codexSelectedTokens: number;
+  totalSelectedTokens: number;
+  claudeCost: number;
+  codexCost: number;
+  totalCost: number;
+};
+
+type ProviderTone = 'cyan' | 'amber';
+
+// Option keys (labels resolved via t() at render time)
+const RANGE_KEYS: TimeRange[] = ['30d', '90d', 'all'];
+const LENS_KEYS: TokenLens[] = ['active', 'all'];
+const HEATMAP_KEYS: HeatmapSource[] = ['total', 'claude', 'codex'];
+const HEATMAP_DAY_KEYS: HeatmapDayFilter[] = ['all', 'weekday', 'weekend'];
+const HEATMAP_INTENSITY_KEYS: HeatmapIntensityFilter[] = ['all', 'p50', 'p75'];
+const HEATMAP_SCALE_KEYS: HeatmapScale[] = ['linear', 'log'];
+const ANALYTICS_PROVIDER_KEYS: AnalyticsProvider[] = ['claude', 'codex'];
+
+let LOCALE_SNAPSHOT: Locale = 'fr';
+function currentLocale(): Locale {
+  return LOCALE_SNAPSHOT;
+}
+
+function numberLabel(value: number): string {
+  return Intl.NumberFormat(numberLocale(currentLocale())).format(Math.round(value));
+}
+
+function percentLabel(value: number): string {
+  return `${value.toFixed(1)}%`;
+}
+
+function currencyLabel(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
+function yyyymmddFromDate(date: Date): string {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(date.getUTCDate()).padStart(2, '0');
+  return `${y}${m}${d}`;
+}
+
+function isoDateFromDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function daysAgo(days: number): Date {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - days);
+  return date;
+}
+
+function queryRange(range: TimeRange): { fromIso: string; fromCompact: string } {
+  const fromDate = range === '30d' ? daysAgo(30) : range === '90d' ? daysAgo(90) : daysAgo(365);
+  return {
+    fromIso: isoDateFromDate(fromDate),
+    fromCompact: yyyymmddFromDate(fromDate),
+  };
+}
+
+function shortProjectName(row: ProjectRowLike): string {
+  if (row.projectName && row.projectName.trim().length > 0) {
+    return row.projectName;
+  }
+
+  const source = row.projectPath || row.projectKey;
+  const parts = source.split('/').filter(Boolean);
+  return parts[parts.length - 1] || source;
+}
+
+function projectSelectorValue(row: ProjectRowLike): string {
+  return row.projectId || row.projectKey;
+}
+
+function percentage(part: number, total: number): number {
+  if (total <= 0) {
+    return 0;
+  }
+  return (part / total) * 100;
+}
+
+function providerTokenTitle(lens: TokenLens): string {
+  return lens === 'all' ? 'Tokens + cache' : 'Tokens actifs';
+}
+
+function heatmapSourceLabel(source: HeatmapSource): string {
+  if (source === 'claude') {
+    return 'Claude';
+  }
+  if (source === 'codex') {
+    return 'Codex';
+  }
+  return 'Total';
+}
+
+function quantile(values: number[], q: number): number {
+  if (values.length === 0) {
+    return 0;
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = (sorted.length - 1) * q;
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  if (lower === upper) {
+    return sorted[lower];
+  }
+
+  const ratio = idx - lower;
+  return sorted[lower] * (1 - ratio) + sorted[upper] * ratio;
+}
+
+function isWeekEnd(dateIso: string): boolean {
+  const day = new Date(`${dateIso}T00:00:00Z`).getUTCDay();
+  return day === 0 || day === 6;
+}
+
+/**
+ * Retourne le plan name de la charge couvrant asOfTs (ou la plus récente à défaut).
+ * Parcourt billingHistory[source] pour trouver l'abo actif aujourd'hui.
+ */
+function pickLatestActivePlan(
+  charges: BillingHistory['claude'] | BillingHistory['codex'] | undefined,
+  asOfTs: number,
+): string | null {
+  if (!charges || charges.length === 0) {
+    return null;
+  }
+  const sorted = [...charges].sort((a, b) => b.date.localeCompare(a.date));
+  const DAY = 86_400;
+  for (const charge of sorted) {
+    const startTs = Math.floor(new Date(`${charge.date}T00:00:00Z`).getTime() / 1000);
+    const coverageDays = charge.coverageDays ?? 31;
+    const endTs = startTs + coverageDays * DAY;
+    if (asOfTs >= startTs && asOfTs < endTs) {
+      return charge.plan;
+    }
+  }
+  // Fallback: plan le plus récent si aucune coverage ne couvre maintenant
+  return sorted[0]?.plan ?? null;
+}
+
+export default function UsageRoute() {
+  const { t, locale } = useTranslation();
+  LOCALE_SNAPSHOT = locale;
+  const [dailyCombined, setDailyCombined] = useState<CombinedDailyRow[]>([]);
+  const [sourceWarnings, setSourceWarnings] = useState<{
+    claude?: string | null;
+    codex?: string | null;
+  }>({});
+  const [byProject, setByProject] = useState<ProjectUsageRow[]>([]);
+  const [byModel, setByModel] = useState<ModelUsageRow[]>([]);
+  const [hourly, setHourly] = useState<HourDistributionRow[]>([]);
+  const [toolUsage, setToolUsage] = useState<ToolUsageRow[]>([]);
+  const [jsonlMeta, setJsonlMeta] = useState<UsageMeta | null>(null);
+  const [codexByProject, setCodexByProject] = useState<CodexProjectUsageRow[]>([]);
+  const [codexByModel, setCodexByModel] = useState<CodexModelUsageRow[]>([]);
+  const [codexHourly, setCodexHourly] = useState<CodexHourDistributionRow[]>([]);
+  const [codexTools, setCodexTools] = useState<ToolUsageRow[]>([]);
+  const [codexRateLimits, setCodexRateLimits] =
+    useState<CodexRateLimitsPayload['rateLimits']>(null);
+  const [codexJsonlMeta, setCodexJsonlMeta] = useState<CodexUsageMeta | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [toolUsageError, setToolUsageError] = useState<string | null>(null);
+  const [codexError, setCodexError] = useState<string | null>(null);
+  const [codexToolError, setCodexToolError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isToolUsageLoading, setIsToolUsageLoading] = useState(false);
+  const [isCodexLoading, setIsCodexLoading] = useState(false);
+  const [isCodexToolLoading, setIsCodexToolLoading] = useState(false);
+  const [range, setRange] = useState<TimeRange>('90d');
+  const [tokenLens, setTokenLens] = useState<TokenLens>('active');
+  const [chartBucket, setChartBucket] = useState<'day' | 'week' | 'month' | 'year'>('day');
+  const [heatmapSource, setHeatmapSource] = useState<HeatmapSource>('total');
+  const [heatmapDayFilter, setHeatmapDayFilter] = useState<HeatmapDayFilter>('all');
+  const [heatmapIntensity, setHeatmapIntensity] = useState<HeatmapIntensityFilter>('all');
+  const [heatmapScale, setHeatmapScale] = useState<HeatmapScale>('linear');
+  const [analyticsProvider, setAnalyticsProvider] = useState<AnalyticsProvider>('claude');
+  const [selectedProjectRef, setSelectedProjectRef] = useState<string>('');
+  const [selectedCodexProjectRef, setSelectedCodexProjectRef] = useState<string>('');
+  const [subscriptions, setSubscriptions] = useState<SubscriptionSettings | null>(null);
+  const [billingHistory, setBillingHistory] = useState<BillingHistory | null>(null);
+  const [allTimeDaily, setAllTimeDaily] = useState<CombinedDailyRow[]>([]);
+
+  useEffect(() => {
+    apiGet<{ subscriptions?: SubscriptionSettings; billingHistory?: BillingHistory }>(
+      '/api/settings',
+    )
+      .then((data) => {
+        if (data.billingHistory) {
+          setBillingHistory(data.billingHistory);
+        }
+        if (data.subscriptions) {
+          // Override monthlyEur + plan name with the actual currently active charge
+          // from billingHistory (source de vérité : charges réelles, pas settings figés).
+          const nowSec = Math.floor(Date.now() / 1000);
+          const claudeBilling = data.billingHistory?.claude
+            ? computeBillingCost(data.billingHistory, 'claude', nowSec - 30 * 86400, nowSec, nowSec)
+            : null;
+          const codexBilling = data.billingHistory?.codex
+            ? computeBillingCost(data.billingHistory, 'codex', nowSec - 30 * 86400, nowSec, nowSec)
+            : null;
+
+          const claudeActive = claudeBilling?.activeMonthly.claude ?? 0;
+          const codexActive = codexBilling?.activeMonthly.codex ?? 0;
+
+          // Latest active plan names
+          const latestClaudePlan = pickLatestActivePlan(data.billingHistory?.claude, nowSec);
+          const latestCodexPlan = pickLatestActivePlan(data.billingHistory?.codex, nowSec);
+
+          setSubscriptions({
+            ...data.subscriptions,
+            claude: {
+              plan: latestClaudePlan || data.subscriptions.claude.plan,
+              monthlyEur: claudeActive > 0 ? claudeActive : data.subscriptions.claude.monthlyEur,
+            },
+            codex: {
+              plan: latestCodexPlan || data.subscriptions.codex.plan,
+              monthlyEur: codexActive > 0 ? codexActive : data.subscriptions.codex.monthlyEur,
+            },
+          });
+        }
+      })
+      .catch(() => {
+        /* ignore */
+      });
+  }, []);
+
+  // Fetch all-time daily data (independent of period selector) for the EconomyCard.
+  useEffect(() => {
+    let cancelled = false;
+    // 2020-01-01 comme borne basse : couvre tout l'historique imaginable.
+    apiGet<CombinedDailyResponse>('/api/usage/daily-combined?from=20200101')
+      .then((data) => {
+        if (!cancelled) {
+          setAllTimeDaily(data.rows || []);
+        }
+      })
+      .catch(() => {
+        /* ignore — EconomyCard fera fallback sur la période courante */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const { fromIso, fromCompact } = queryRange(range);
+
+    setIsLoading(true);
+    setError(null);
+
+    Promise.all([
+      apiGet<CombinedDailyResponse>(`/api/usage/daily-combined?from=${fromCompact}`),
+      apiGet<UsageResponse<ProjectUsageRow>>(`/api/usage/by-project?from=${fromIso}&limit=80`),
+      apiGet<UsageResponse<ModelUsageRow>>(`/api/usage/by-model?from=${fromIso}`),
+      apiGet<UsageResponse<HourDistributionRow>>(`/api/usage/hour-distribution?from=${fromIso}`),
+    ])
+      .then(([combinedData, projectData, modelData, hourData]) => {
+        if (cancelled) {
+          return;
+        }
+
+        setDailyCombined(combinedData.rows || []);
+        setSourceWarnings(combinedData.warnings || {});
+        setByProject(projectData.rows || []);
+        setByModel(modelData.rows || []);
+        setHourly(hourData.rows || []);
+        setJsonlMeta(projectData.meta || modelData.meta || hourData.meta || null);
+
+        setSelectedProjectRef((current) => {
+          if (!projectData.rows || projectData.rows.length === 0) {
+            return '';
+          }
+          const exists = projectData.rows.some((row) => projectSelectorValue(row) === current);
+          return exists ? current : projectSelectorValue(projectData.rows[0]);
+        });
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(String(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [range]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const { fromIso } = queryRange(range);
+
+    setIsToolUsageLoading(true);
+    setToolUsageError(null);
+
+    const selected = byProject.find((row) => projectSelectorValue(row) === selectedProjectRef);
+    const url = !selectedProjectRef
+      ? `/api/usage/tool-usage?from=${fromIso}`
+      : selected?.projectId
+        ? `/api/usage/tool-usage?from=${fromIso}&projectId=${encodeURIComponent(selected.projectId)}`
+        : selected
+          ? `/api/usage/tool-usage?from=${fromIso}&project=${encodeURIComponent(selected.projectKey)}`
+          : `/api/usage/tool-usage?from=${fromIso}`;
+
+    apiGet<ToolUsageResponse>(url)
+      .then((result) => {
+        if (cancelled) {
+          return;
+        }
+        setToolUsage(result.rows || []);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setToolUsageError(String(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsToolUsageLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProjectRef, byProject, range]);
+
+  useEffect(() => {
+    if (analyticsProvider !== 'codex') {
+      return;
+    }
+
+    let cancelled = false;
+    const { fromIso } = queryRange(range);
+
+    setIsCodexLoading(true);
+    setCodexError(null);
+
+    Promise.all([
+      apiGet<CodexUsageResponse<CodexProjectUsageRow>>(
+        `/api/usage/codex/by-project?from=${fromIso}&limit=80`,
+      ),
+      apiGet<CodexUsageResponse<CodexModelUsageRow>>(`/api/usage/codex/by-model?from=${fromIso}`),
+      apiGet<CodexUsageResponse<CodexHourDistributionRow>>(
+        `/api/usage/codex/hour-distribution?from=${fromIso}`,
+      ),
+      apiGet<CodexRateLimitsPayload>(`/api/usage/codex/rate-limits?from=${fromIso}`),
+    ])
+      .then(([projectData, modelData, hourData, rateLimitsData]) => {
+        if (cancelled) {
+          return;
+        }
+        setCodexByProject(projectData.rows || []);
+        setCodexByModel(modelData.rows || []);
+        setCodexHourly(hourData.rows || []);
+        setCodexRateLimits(rateLimitsData.rateLimits || null);
+        setCodexJsonlMeta(projectData.meta || modelData.meta || hourData.meta || null);
+        setSelectedCodexProjectRef((current) => {
+          if (!projectData.rows || projectData.rows.length === 0) {
+            return '';
+          }
+          const exists = projectData.rows.some((row) => projectSelectorValue(row) === current);
+          return exists ? current : projectSelectorValue(projectData.rows[0]);
+        });
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setCodexError(String(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsCodexLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [analyticsProvider, range]);
+
+  useEffect(() => {
+    if (analyticsProvider !== 'codex') {
+      return;
+    }
+
+    let cancelled = false;
+    const { fromIso } = queryRange(range);
+
+    setIsCodexToolLoading(true);
+    setCodexToolError(null);
+
+    const selected = codexByProject.find(
+      (row) => projectSelectorValue(row) === selectedCodexProjectRef,
+    );
+    const url = !selectedCodexProjectRef
+      ? `/api/usage/codex/tool-usage?from=${fromIso}`
+      : selected?.projectId
+        ? `/api/usage/codex/tool-usage?from=${fromIso}&projectId=${encodeURIComponent(selected.projectId)}`
+        : selected
+          ? `/api/usage/codex/tool-usage?from=${fromIso}&project=${encodeURIComponent(selected.projectKey)}`
+          : `/api/usage/codex/tool-usage?from=${fromIso}`;
+
+    apiGet<CodexToolUsageResponse>(url)
+      .then((result) => {
+        if (cancelled) {
+          return;
+        }
+        setCodexTools(result.rows || []);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setCodexToolError(String(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsCodexToolLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [analyticsProvider, selectedCodexProjectRef, codexByProject, range]);
+
+  const chartData = useMemo(() => {
+    const rows = [...dailyCombined]
+      .map((row) => {
+        const claudeActive = Number(row.claudeTokens || 0);
+        const claudeCache =
+          Number(row.claudeCacheCreateTokens || 0) + Number(row.claudeCacheReadTokens || 0);
+        const codexActive = Number(row.codexTokens || 0);
+        const codexCache = Number(row.codexCachedInputTokens || 0);
+        const claudeAll = claudeActive + claudeCache;
+        const codexAll = codexActive + codexCache;
+
+        return {
+          date: String(row.date),
+          claudeActiveTokens: claudeActive,
+          claudeCacheTokens: claudeCache,
+          claudeAllTokens: claudeAll,
+          codexActiveTokens: codexActive,
+          codexCacheTokens: codexCache,
+          codexAllTokens: codexAll,
+          totalActiveTokens: Number(row.totalTokens || 0),
+          totalAllTokens: claudeAll + codexAll,
+          claudeSelectedTokens: tokenLens === 'all' ? claudeAll : claudeActive,
+          codexSelectedTokens: tokenLens === 'all' ? codexAll : codexActive,
+          totalSelectedTokens: 0,
+          claudeCost: Number(row.claudeCostUsd || 0),
+          codexCost: Number(row.codexCostUsd || 0),
+          totalCost: Number(row.totalCostUsd || 0),
+        } satisfies ChartRow;
+      })
+      .map((row) => ({
+        ...row,
+        totalSelectedTokens: row.claudeSelectedTokens + row.codexSelectedTokens,
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    if (range === '30d') {
+      return rows.slice(-30);
+    }
+    if (range === '90d') {
+      return rows.slice(-90);
+    }
+    return rows;
+  }, [dailyCombined, range, tokenLens]);
+
+  const totals = useMemo(() => {
+    return chartData.reduce(
+      (acc, row) => {
+        acc.claudeActiveTokens += row.claudeActiveTokens;
+        acc.claudeCacheTokens += row.claudeCacheTokens;
+        acc.claudeAllTokens += row.claudeAllTokens;
+        acc.codexActiveTokens += row.codexActiveTokens;
+        acc.codexCacheTokens += row.codexCacheTokens;
+        acc.codexAllTokens += row.codexAllTokens;
+        acc.totalActiveTokens += row.totalActiveTokens;
+        acc.totalAllTokens += row.totalAllTokens;
+        acc.totalSelectedTokens += row.totalSelectedTokens;
+        acc.totalCost += row.totalCost;
+        acc.claudeCost += row.claudeCost;
+        acc.codexCost += row.codexCost;
+        return acc;
+      },
+      {
+        claudeActiveTokens: 0,
+        claudeCacheTokens: 0,
+        claudeAllTokens: 0,
+        codexActiveTokens: 0,
+        codexCacheTokens: 0,
+        codexAllTokens: 0,
+        totalActiveTokens: 0,
+        totalAllTokens: 0,
+        totalSelectedTokens: 0,
+        totalCost: 0,
+        claudeCost: 0,
+        codexCost: 0,
+      },
+    );
+  }, [chartData]);
+
+  const monthly = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        month: string;
+        claudeSelectedTokens: number;
+        codexSelectedTokens: number;
+        totalSelectedTokens: number;
+        totalCost: number;
+        claudeCost: number;
+        codexCost: number;
+      }
+    >();
+
+    for (const row of chartData) {
+      const month = row.date.slice(0, 7);
+      const current = map.get(month) || {
+        month,
+        claudeSelectedTokens: 0,
+        codexSelectedTokens: 0,
+        totalSelectedTokens: 0,
+        totalCost: 0,
+        claudeCost: 0,
+        codexCost: 0,
+      };
+
+      current.claudeSelectedTokens += row.claudeSelectedTokens;
+      current.codexSelectedTokens += row.codexSelectedTokens;
+      current.totalSelectedTokens += row.totalSelectedTokens;
+      current.totalCost += row.totalCost;
+      current.claudeCost += row.claudeCost;
+      current.codexCost += row.codexCost;
+      map.set(month, current);
+    }
+
+    return [...map.values()].sort((a, b) => a.month.localeCompare(b.month));
+  }, [chartData]);
+
+  // Chart fusionné : agrégation par bucket (jour/semaine/mois/année) avec cumul
+  // des tokens (actif + cache séparés) et des coûts par provider. Même forme de row
+  // que chartData journalier → compatible avec ComposedChart (bars + lines).
+  const bucketedChart = useMemo(() => {
+    if (chartBucket === 'day') {
+      return chartData.map((row) => ({ ...row, bucketKey: row.date, label: row.date }));
+    }
+    const keyOf = (dateIso: string): { key: string; label: string } => {
+      const d = new Date(`${dateIso}T00:00:00Z`);
+      if (chartBucket === 'month') {
+        const key = dateIso.slice(0, 7);
+        return { key, label: key };
+      }
+      if (chartBucket === 'year') {
+        const key = dateIso.slice(0, 4);
+        return { key, label: key };
+      }
+      // week : ISO week (Mon-first). key = YYYY-Www
+      const tmp = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+      const dayNum = (tmp.getUTCDay() + 6) % 7;
+      tmp.setUTCDate(tmp.getUTCDate() - dayNum + 3);
+      const firstThursday = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 4));
+      const week = 1 + Math.round(((tmp.getTime() - firstThursday.getTime()) / 86_400_000 - 3) / 7);
+      const key = `${tmp.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+      return { key, label: key };
+    };
+
+    const map = new Map<
+      string,
+      {
+        bucketKey: string;
+        label: string;
+        claudeActiveTokens: number;
+        claudeCacheTokens: number;
+        claudeAllTokens: number;
+        codexActiveTokens: number;
+        codexCacheTokens: number;
+        codexAllTokens: number;
+        totalActiveTokens: number;
+        totalAllTokens: number;
+        totalSelectedTokens: number;
+        claudeSelectedTokens: number;
+        codexSelectedTokens: number;
+        claudeCost: number;
+        codexCost: number;
+        totalCost: number;
+      }
+    >();
+
+    for (const row of chartData) {
+      const { key, label } = keyOf(row.date);
+      const bucket = map.get(key) || {
+        bucketKey: key,
+        label,
+        claudeActiveTokens: 0,
+        claudeCacheTokens: 0,
+        claudeAllTokens: 0,
+        codexActiveTokens: 0,
+        codexCacheTokens: 0,
+        codexAllTokens: 0,
+        totalActiveTokens: 0,
+        totalAllTokens: 0,
+        totalSelectedTokens: 0,
+        claudeSelectedTokens: 0,
+        codexSelectedTokens: 0,
+        claudeCost: 0,
+        codexCost: 0,
+        totalCost: 0,
+      };
+      bucket.claudeActiveTokens += row.claudeActiveTokens;
+      bucket.claudeCacheTokens += row.claudeCacheTokens;
+      bucket.claudeAllTokens += row.claudeAllTokens;
+      bucket.codexActiveTokens += row.codexActiveTokens;
+      bucket.codexCacheTokens += row.codexCacheTokens;
+      bucket.codexAllTokens += row.codexAllTokens;
+      bucket.totalActiveTokens += row.totalActiveTokens;
+      bucket.totalAllTokens += row.totalAllTokens;
+      bucket.totalSelectedTokens += row.totalSelectedTokens;
+      bucket.claudeSelectedTokens += row.claudeSelectedTokens;
+      bucket.codexSelectedTokens += row.codexSelectedTokens;
+      bucket.claudeCost += row.claudeCost;
+      bucket.codexCost += row.codexCost;
+      bucket.totalCost += row.totalCost;
+      map.set(key, bucket);
+    }
+
+    return [...map.values()].sort((a, b) => a.bucketKey.localeCompare(b.bucketKey));
+  }, [chartData, chartBucket]);
+
+  const baseHeatmapDays = useMemo(() => {
+    const key =
+      heatmapSource === 'claude'
+        ? 'claudeSelectedTokens'
+        : heatmapSource === 'codex'
+          ? 'codexSelectedTokens'
+          : 'totalSelectedTokens';
+
+    return chartData.map((row) => ({
+      date: row.date,
+      count: Number(row[key] || 0),
+      color: null,
+    }));
+  }, [chartData, heatmapSource]);
+
+  const heatmapModel = useMemo(() => {
+    const scoped = baseHeatmapDays.map((day) => {
+      const weekend = isWeekEnd(day.date);
+      const inScope =
+        heatmapDayFilter === 'all' || (heatmapDayFilter === 'weekday' ? !weekend : weekend);
+      return {
+        ...day,
+        inScope,
+      };
+    });
+
+    const positiveScopedCounts = scoped
+      .filter((day) => day.inScope && day.count > 0)
+      .map((day) => day.count);
+
+    const threshold =
+      heatmapIntensity === 'p50'
+        ? quantile(positiveScopedCounts, 0.5)
+        : heatmapIntensity === 'p75'
+          ? quantile(positiveScopedCounts, 0.75)
+          : 0;
+
+    const filteredDays = scoped.map((day) => {
+      if (!day.inScope) {
+        return {
+          date: day.date,
+          count: 0,
+          color: null,
+        };
+      }
+
+      const aboveThreshold = day.count >= threshold;
+      const raw = aboveThreshold ? day.count : 0;
+      const scaled =
+        heatmapScale === 'log' && raw > 0 ? Math.round(Math.log10(raw + 1) * 1000) : raw;
+      return {
+        date: day.date,
+        count: scaled,
+        color: null,
+      };
+    });
+
+    return {
+      days: filteredDays,
+      rawTotalInScope: scoped.filter((day) => day.inScope).reduce((sum, day) => sum + day.count, 0),
+      visibleDays: filteredDays.filter((day) => day.count > 0).length,
+      scopedDays: scoped.filter((day) => day.inScope).length,
+      threshold,
+    };
+  }, [baseHeatmapDays, heatmapDayFilter, heatmapIntensity, heatmapScale]);
+
+  const heatmapPalette = useMemo(() => {
+    if (heatmapSource === 'claude') {
+      return 'cyan' as const;
+    }
+    if (heatmapSource === 'codex') {
+      return 'amber' as const;
+    }
+    return 'github' as const;
+  }, [heatmapSource]);
+
+  const selectedProject = useMemo(() => {
+    return byProject.find((row) => projectSelectorValue(row) === selectedProjectRef) || null;
+  }, [byProject, selectedProjectRef]);
+
+  const hasCombinedData = chartData.length > 0;
+  const hasClaudeData =
+    chartData.some((row) => row.claudeAllTokens > 0 || row.claudeCost > 0) || byProject.length > 0;
+  const hasCodexData = chartData.some((row) => row.codexAllTokens > 0 || row.codexCost > 0);
+
+  const claudeTokenShare = percentage(
+    tokenLens === 'all' ? totals.claudeAllTokens : totals.claudeActiveTokens,
+    totals.totalSelectedTokens,
+  );
+  const codexTokenShare = percentage(
+    tokenLens === 'all' ? totals.codexAllTokens : totals.codexActiveTokens,
+    totals.totalSelectedTokens,
+  );
+  const claudeCostShare = percentage(totals.claudeCost, totals.totalCost);
+  const codexCostShare = percentage(totals.codexCost, totals.totalCost);
+
+  // All-time aggregates for EconomyCard — indépendants du period selector
+  const allTimeTotals = useMemo(() => {
+    const claudeCostUsd = allTimeDaily.reduce(
+      (acc, row) => acc + Number(row.claudeCostUsd || 0),
+      0,
+    );
+    const codexCostUsd = allTimeDaily.reduce((acc, row) => acc + Number(row.codexCostUsd || 0), 0);
+    const firstDate =
+      allTimeDaily.length > 0
+        ? [...allTimeDaily].sort((a, b) => String(a.date).localeCompare(String(b.date)))[0].date
+        : null;
+    const lastDate =
+      allTimeDaily.length > 0
+        ? [...allTimeDaily].sort((a, b) => String(b.date).localeCompare(String(a.date)))[0].date
+        : null;
+    return { claudeCostUsd, codexCostUsd, firstDate, lastDate };
+  }, [allTimeDaily]);
+
+  const allTimePaid = useMemo(() => {
+    const sumCharges = (charges: BillingHistory['claude'] | undefined) =>
+      (charges || []).reduce((acc, c) => acc + c.amountEur, 0);
+    return {
+      claude: sumCharges(billingHistory?.claude),
+      codex: sumCharges(billingHistory?.codex),
+    };
+  }, [billingHistory]);
+
+  // Première date d'engagement = min(première charge abo, première donnée métrée)
+  const allTimeFirstDate = useMemo(() => {
+    const billingDates = [...(billingHistory?.claude || []), ...(billingHistory?.codex || [])].map(
+      (c) => c.date,
+    );
+    const meteredDate = allTimeTotals.firstDate;
+    const candidates = [...billingDates, meteredDate].filter(
+      (d): d is string => typeof d === 'string' && d.length > 0,
+    );
+    if (candidates.length === 0) {
+      return null;
+    }
+    return candidates.sort()[0];
+  }, [billingHistory, allTimeTotals.firstDate]);
+
+  const topToolMax = toolUsage[0]?.count || 1;
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="section-head">
+        <div className="flex flex-col gap-0.5">
+          <h2 className="section-title">{t('usage.title')}</h2>
+          <div className="section-meta">{t('usage.headerMeta')}</div>
+        </div>
+      </div>
+
+      {error ? (
+        <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+          {error}
+        </div>
+      ) : null}
+
+      {subscriptions ? (
+        <EconomyCard
+          claudeCostUsd={allTimeTotals.claudeCostUsd}
+          codexCostUsd={allTimeTotals.codexCostUsd}
+          claudePaidEur={allTimePaid.claude}
+          codexPaidEur={allTimePaid.codex}
+          firstDate={allTimeFirstDate}
+          lastDate={allTimeTotals.lastDate}
+          meteredFirstDate={allTimeTotals.firstDate}
+          subs={subscriptions}
+        />
+      ) : null}
+
+      <ProjectsUsageLLM />
+
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-4">
+        <ProviderSummaryCard
+          title="Claude"
+          tone="cyan"
+          lens={tokenLens}
+          selectedTokens={tokenLens === 'all' ? totals.claudeAllTokens : totals.claudeActiveTokens}
+          activeTokens={totals.claudeActiveTokens}
+          cacheTokens={totals.claudeCacheTokens}
+          cost={totals.claudeCost}
+          tokenShare={claudeTokenShare}
+          costShare={claudeCostShare}
+        />
+
+        <ProviderSummaryCard
+          title="Codex"
+          tone="amber"
+          lens={tokenLens}
+          selectedTokens={tokenLens === 'all' ? totals.codexAllTokens : totals.codexActiveTokens}
+          activeTokens={totals.codexActiveTokens}
+          cacheTokens={totals.codexCacheTokens}
+          cost={totals.codexCost}
+          tokenShare={codexTokenShare}
+          costShare={codexCostShare}
+        />
+
+        <MetricCard
+          title={t('usage.metrics.totalTokens')}
+          value={numberLabel(totals.totalSelectedTokens)}
+        >
+          <MetricLine
+            label={providerTokenTitle(tokenLens)}
+            value={numberLabel(totals.totalSelectedTokens)}
+          />
+          <MetricLine
+            label={t('usage.metricLines.totalCost')}
+            value={currencyLabel(totals.totalCost)}
+          />
+          <MetricLine label={t('common.days')} value={String(chartData.length)} />
+        </MetricCard>
+
+        <MetricCard
+          title={t('usage.metrics.coverage')}
+          value={hasCombinedData ? 'OK' : t('common.empty')}
+          valueTone="text-emerald-200"
+        >
+          <MetricLine
+            label={t('usage.metricLines.combinedDaily')}
+            value={
+              hasCombinedData
+                ? t('usage.metricLines.daysCount', { n: chartData.length })
+                : t('usage.metricLines.noLine')
+            }
+          />
+          <MetricLine
+            label={t('usage.metricLines.jsonlFiles')}
+            value={jsonlMeta ? String(jsonlMeta.filesScanned) : 'n/a'}
+          />
+          <MetricLine
+            label={t('usage.metricLines.jsonlMessages')}
+            value={
+              jsonlMeta ? numberLabel(jsonlMeta.assistantMessages + jsonlMeta.userMessages) : 'n/a'
+            }
+          />
+        </MetricCard>
+      </div>
+
+      <Panel
+        title={t('usage.metrics.heatmapUsage')}
+        subtitle={`${t('usage.filters.source')}: ${heatmapSourceLabel(heatmapSource)} · ${providerTokenTitle(tokenLens)}`}
+      >
+        <div className="mb-3 flex flex-wrap items-end gap-3">
+          <LabeledSelect
+            label={t('usage.filters.source')}
+            value={heatmapSource}
+            options={HEATMAP_KEYS.map((k) => ({ value: k, label: t(`usage.heatmapSource.${k}`) }))}
+            onChange={(value) => setHeatmapSource(value as HeatmapSource)}
+          />
+          <LabeledSelect
+            label={t('usage.filters.dayFilter')}
+            value={heatmapDayFilter}
+            options={HEATMAP_DAY_KEYS.map((k) => ({
+              value: k,
+              label: t(`usage.heatmapDayFilter.${k}`),
+            }))}
+            onChange={(value) => setHeatmapDayFilter(value as HeatmapDayFilter)}
+          />
+          <LabeledSelect
+            label={t('usage.filters.intensity')}
+            value={heatmapIntensity}
+            options={HEATMAP_INTENSITY_KEYS.map((k) => ({
+              value: k,
+              label: t(`usage.heatmapIntensity.${k}`),
+            }))}
+            onChange={(value) => setHeatmapIntensity(value as HeatmapIntensityFilter)}
+          />
+          <LabeledSelect
+            label={t('usage.filters.scale')}
+            value={heatmapScale}
+            options={HEATMAP_SCALE_KEYS.map((k) => ({
+              value: k,
+              label: t(`usage.heatmapScale.${k}`),
+            }))}
+            onChange={(value) => setHeatmapScale(value as HeatmapScale)}
+          />
+        </div>
+
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+          <span className="ui-chip">
+            {t('usage.filters.visibleDays', {
+              visible: heatmapModel.visibleDays,
+              total: heatmapModel.scopedDays,
+            })}
+          </span>
+          <span className="ui-chip">
+            {t('usage.filters.threshold', {
+              value:
+                heatmapIntensity === 'all'
+                  ? t('usage.filters.thresholdNone')
+                  : numberLabel(heatmapModel.threshold),
+            })}
+          </span>
+          <span className="ui-chip">
+            {t('usage.filters.scaleLabel', {
+              value:
+                heatmapScale === 'log'
+                  ? t('usage.filters.scaleLog')
+                  : t('usage.filters.scaleLinear'),
+            })}
+          </span>
+        </div>
+
+        {heatmapModel.days.length === 0 ? (
+          <EmptyBlock message={t('usage.filters.emptyHeatmap')} />
+        ) : (
+          <Heatmap
+            days={heatmapModel.days}
+            palette={heatmapPalette}
+            totalLabel={providerTokenTitle(tokenLens).toLowerCase()}
+            totalValue={heatmapModel.rawTotalInScope}
+            cellSize={14}
+            cellGap={4}
+            minWidth={1040}
+          />
+        )}
+      </Panel>
+
+      <Panel
+        title={t('usage.tokensPanelTitle')}
+        subtitle={
+          tokenLens === 'all'
+            ? t('usage.tokensPanelSubtitleAll')
+            : t('usage.tokensPanelSubtitleActive')
+        }
+        action={
+          <div className="flex items-center gap-1">
+            {(
+              [
+                { value: 'day', label: t('usage.bucket.day') },
+                { value: 'week', label: t('usage.bucket.week') },
+                { value: 'month', label: t('usage.bucket.month') },
+                { value: 'year', label: t('usage.bucket.year') },
+              ] as const
+            ).map((opt) => {
+              const active = chartBucket === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setChartBucket(opt.value)}
+                  className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${active ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]' : 'border-[var(--border)] text-[var(--text-dim)] hover:border-[var(--border-strong)] hover:text-[var(--text)]'}`}
+                  aria-pressed={active}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+        }
+      >
+        {bucketedChart.length === 0 ? (
+          <EmptyBlock message={t('usage.noSeriesData')} />
+        ) : (
+          <div className="h-96 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart
+                data={bucketedChart}
+                margin={{ top: 8, right: 12, left: 0, bottom: 0 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                <XAxis dataKey="label" tick={{ fill: '#94a3b8', fontSize: 11 }} minTickGap={20} />
+                <YAxis
+                  yAxisId="tokens"
+                  tick={{ fill: '#94a3b8', fontSize: 11 }}
+                  tickFormatter={tokenTickFormatter}
+                />
+                <YAxis
+                  yAxisId="cost"
+                  orientation="right"
+                  tick={{ fill: '#94a3b8', fontSize: 11 }}
+                  tickFormatter={currencyTickFormatter}
+                />
+                <Tooltip
+                  contentStyle={tooltipStyle}
+                  formatter={(value, name) =>
+                    String(name ?? '')
+                      .toLowerCase()
+                      .includes('cost')
+                      ? currencyLabel(Number(value ?? 0))
+                      : numberLabel(Number(value ?? 0))
+                  }
+                />
+                <Legend />
+
+                <Bar
+                  yAxisId="tokens"
+                  dataKey="claudeSelectedTokens"
+                  name="claude tokens"
+                  stackId="tokens"
+                  fill="#06b6d4"
+                  radius={[4, 4, 0, 0]}
+                />
+                <Bar
+                  yAxisId="tokens"
+                  dataKey="codexSelectedTokens"
+                  name="codex tokens"
+                  stackId="tokens"
+                  fill="#f59e0b"
+                  radius={[4, 4, 0, 0]}
+                />
+
+                <Line
+                  yAxisId="cost"
+                  type="monotone"
+                  dataKey="claudeCost"
+                  name="claude cost"
+                  stroke="#67e8f9"
+                  strokeWidth={1.6}
+                  dot={false}
+                />
+                <Line
+                  yAxisId="cost"
+                  type="monotone"
+                  dataKey="codexCost"
+                  name="codex cost"
+                  stroke="#fbbf24"
+                  strokeWidth={1.6}
+                  dot={false}
+                />
+                <Line
+                  yAxisId="cost"
+                  type="monotone"
+                  dataKey="totalCost"
+                  name="total cost"
+                  stroke="#34d399"
+                  strokeDasharray="4 3"
+                  strokeWidth={1.8}
+                  dot={false}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </Panel>
+
+      <div className="rounded-xl border border-slate-800 bg-slate-950/45 p-3">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-100">{t('usage.analytics.title')}</h2>
+            <p className="text-xs text-slate-500">
+              {t('usage.analytics.subtitle', {
+                claudePath: '`~/.claude/projects`',
+                codexPath: '`~/.codex/sessions`',
+              })}
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <LabeledSelect
+              label={t('usage.filters.source')}
+              value={analyticsProvider}
+              options={ANALYTICS_PROVIDER_KEYS.map((k) => ({
+                value: k,
+                label: t(`usage.analyticsProvider.${k}`),
+              }))}
+              onChange={(value) => setAnalyticsProvider(value as AnalyticsProvider)}
+            />
+
+            {analyticsProvider === 'claude' && jsonlMeta ? (
+              <div className="text-right text-xs text-slate-500">
+                <div>
+                  {t('usage.analytics.filesLines', {
+                    files: jsonlMeta.filesScanned,
+                    lines: numberLabel(jsonlMeta.linesParsed),
+                  })}
+                </div>
+                <div>
+                  {t('usage.analytics.repliesPrompts', {
+                    replies: numberLabel(jsonlMeta.assistantMessages),
+                    prompts: numberLabel(jsonlMeta.userMessages),
+                  })}
+                </div>
+              </div>
+            ) : null}
+
+            {analyticsProvider === 'codex' && codexJsonlMeta ? (
+              <div className="text-right text-xs text-slate-500">
+                <div>
+                  {t('usage.analytics.filesLines', {
+                    files: codexJsonlMeta.filesScanned,
+                    lines: numberLabel(codexJsonlMeta.linesParsed),
+                  })}
+                </div>
+                <div>
+                  {numberLabel(codexJsonlMeta.turns)} {t('usage.metricLines.userPrompts')} ·{' '}
+                  {codexJsonlMeta.sessions} sessions
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {analyticsProvider === 'claude' ? (
+          <ClaudeAnalytics
+            byProject={byProject}
+            byModel={byModel}
+            hourly={hourly}
+            toolUsage={toolUsage}
+            selectedProjectRef={selectedProjectRef}
+            setSelectedProjectRef={setSelectedProjectRef}
+            selectedProject={selectedProject}
+            isToolUsageLoading={isToolUsageLoading}
+            toolUsageError={toolUsageError}
+          />
+        ) : (
+          <CodexAnalytics
+            byProject={codexByProject}
+            byModel={codexByModel}
+            hourly={codexHourly}
+            tools={codexTools}
+            rateLimits={codexRateLimits}
+            selectedProjectRef={selectedCodexProjectRef}
+            setSelectedProjectRef={setSelectedCodexProjectRef}
+            isLoading={isCodexLoading}
+            isToolsLoading={isCodexToolLoading}
+            error={codexError}
+            toolsError={codexToolError}
+          />
+        )}
+      </div>
+
+      {isLoading ? (
+        <p className="text-[12px] text-[var(--text-dim)]">{t('usage.analytics.refreshing')}</p>
+      ) : null}
+    </div>
+  );
+}
+
+const tooltipStyle = {
+  backgroundColor: '#0b0d11',
+  border: '1px solid rgba(255,255,255,0.1)',
+  borderRadius: 10,
+  color: '#f5f5f7',
+  fontSize: 12,
+};
+
+function tokenTickFormatter(value: number): string {
+  return numberLabel(value);
+}
+
+function currencyTickFormatter(value: number): string {
+  return `$${value}`;
+}
+
+function Panel({
+  title,
+  subtitle,
+  children,
+  className,
+  action,
+}: {
+  title: string;
+  subtitle?: string;
+  children: ReactNode;
+  className?: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div
+      className={`rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-1)] p-4 ${className || ''}`.trim()}
+    >
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-[14px] font-semibold text-[var(--text)]">{title}</h2>
+          {subtitle ? (
+            <p className="mt-0.5 text-[12px] text-[var(--text-dim)]">{subtitle}</p>
+          ) : null}
+        </div>
+        {action ? <div className="shrink-0">{action}</div> : null}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function LabeledSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-1.5 text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function SourceBadge({
+  label,
+  hasData,
+  warning,
+  tone: _tone,
+}: {
+  label: string;
+  hasData: boolean;
+  warning: string | null;
+  tone: ProviderTone;
+}) {
+  const banner = warning ? 'warning' : hasData ? 'ready' : 'empty';
+  const chipTone =
+    banner === 'ready' ? 'success' : banner === 'warning' ? 'warn' : ('neutral' as const);
+  return (
+    <span
+      className={`chip chip-${chipTone} text-[11px]`.replace('chip-neutral', '')}
+      title={warning || undefined}
+    >
+      <span className="font-medium">{label}</span>
+      <span className="opacity-70">{banner}</span>
+    </span>
+  );
+}
+
+function ProviderSummaryCard({
+  title,
+  tone,
+  lens,
+  selectedTokens,
+  activeTokens,
+  cacheTokens,
+  cost,
+  tokenShare,
+  costShare,
+}: {
+  title: string;
+  tone: ProviderTone;
+  lens: TokenLens;
+  selectedTokens: number;
+  activeTokens: number;
+  cacheTokens: number;
+  cost: number;
+  tokenShare: number;
+  costShare: number;
+}) {
+  const { t } = useTranslation();
+  const accent =
+    tone === 'cyan'
+      ? { value: 'text-[#64d2ff]', border: 'border-[rgba(100,210,255,0.28)]' }
+      : { value: 'text-[#ffd60a]', border: 'border-[rgba(255,214,10,0.28)]' };
+
+  return (
+    <div className={`rounded-[var(--radius-lg)] border ${accent.border} bg-[var(--surface-1)] p-4`}>
+      <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">{title}</div>
+      <div className={`mt-1 text-[26px] font-semibold tracking-tight num ${accent.value}`}>
+        {numberLabel(selectedTokens)}
+      </div>
+      <div className="mt-0.5 text-[12px] text-[var(--text-dim)]">{providerTokenTitle(lens)}</div>
+
+      <div className="mt-3 flex flex-col gap-1">
+        <MetricLine label={t('usage.metricLines.active')} value={numberLabel(activeTokens)} />
+        <MetricLine label={t('usage.metricLines.cache')} value={numberLabel(cacheTokens)} />
+        <MetricLine label={t('usage.metricLines.cost')} value={currencyLabel(cost)} />
+        <MetricLine label={t('usage.metricLines.tokenShare')} value={percentLabel(tokenShare)} />
+        <MetricLine label={t('usage.metricLines.costShare')} value={percentLabel(costShare)} />
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({
+  title,
+  value,
+  valueTone,
+  children,
+}: {
+  title: string;
+  value: string;
+  valueTone?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-1)] p-4">
+      <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">{title}</div>
+      <div
+        className={`mt-1 text-[26px] font-semibold tracking-tight num ${valueTone || 'text-[#30d158]'}`}
+      >
+        {value}
+      </div>
+      <div className="mt-3 flex flex-col gap-1">{children}</div>
+    </div>
+  );
+}
+
+function MetricLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-2 text-[12px]">
+      <span className="text-[var(--text-dim)]">{label}</span>
+      <span className="num text-[var(--text-mute)]">{value}</span>
+    </div>
+  );
+}
+
+function EmptyBlock({ message }: { message: string }) {
+  return (
+    <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-6 text-center text-sm text-[var(--text-dim)]">
+      {message}
+    </div>
+  );
+}
+
+function euroLabel(value: number): string {
+  return new Intl.NumberFormat(numberLocale(currentLocale()), {
+    style: 'currency',
+    currency: 'EUR',
+    maximumFractionDigits: 0,
+  }).format(Math.round(value));
+}
+
+function EconomyCard({
+  claudeCostUsd,
+  codexCostUsd,
+  claudePaidEur,
+  codexPaidEur,
+  firstDate,
+  lastDate,
+  meteredFirstDate,
+  subs,
+}: {
+  claudeCostUsd: number;
+  codexCostUsd: number;
+  claudePaidEur: number;
+  codexPaidEur: number;
+  firstDate: string | null;
+  lastDate: string | null;
+  meteredFirstDate: string | null;
+  subs: SubscriptionSettings;
+}) {
+  const { t } = useTranslation();
+  // All-time vue : cumul réel payé (cash basis depuis billingHistory) vs cumul PAYG simulé.
+  const claudeMeteredEur = claudeCostUsd * subs.usdToEur;
+  const codexMeteredEur = codexCostUsd * subs.usdToEur;
+  const totalMeteredEur = claudeMeteredEur + codexMeteredEur;
+
+  const totalPaidEur = claudePaidEur + codexPaidEur;
+  const claudeSavingsEur = claudeMeteredEur - claudePaidEur;
+  const codexSavingsEur = codexMeteredEur - codexPaidEur;
+  const totalSavingsEur = totalMeteredEur - totalPaidEur;
+  const ratio = totalPaidEur > 0 ? totalMeteredEur / totalPaidEur : 0;
+
+  const spanDays =
+    firstDate && lastDate
+      ? Math.max(
+          1,
+          Math.round(
+            (new Date(`${lastDate}T00:00:00Z`).getTime() -
+              new Date(`${firstDate}T00:00:00Z`).getTime()) /
+              86_400_000,
+          ) + 1,
+        )
+      : 0;
+  const firstLabel = firstDate
+    ? new Date(`${firstDate}T00:00:00Z`).toLocaleDateString(dateLocale(currentLocale()), {
+        day: '2-digit',
+        month: 'short',
+        year: '2-digit',
+      })
+    : '—';
+
+  // Durée réelle couverte par les données métrées ccusage
+  // (peut être plus courte que l'historique d'abo si ccusage n'a pas tout synchronisé).
+  const meteredDays =
+    meteredFirstDate && lastDate
+      ? Math.max(
+          1,
+          Math.round(
+            (new Date(`${lastDate}T00:00:00Z`).getTime() -
+              new Date(`${meteredFirstDate}T00:00:00Z`).getTime()) /
+              86_400_000,
+          ) + 1,
+        )
+      : 0;
+
+  return (
+    <div className="rounded-[var(--radius-lg)] border border-[rgba(48,209,88,0.28)] bg-[rgba(48,209,88,0.05)] p-4">
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+            {t('usage.economy.headline')}
+          </div>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="num text-[32px] font-semibold tracking-tight text-[#30d158]">
+              {totalSavingsEur >= 0 ? '+' : '−'}
+              {euroLabel(Math.abs(totalSavingsEur))}
+            </span>
+            <span className="text-[12px] text-[var(--text-dim)]">
+              {t('usage.economy.savedSuffix')}
+            </span>
+          </div>
+          <div className="mt-0.5 text-[12px] text-[var(--text-mute)]">
+            {t('usage.economy.summary', {
+              paid: euroLabel(totalPaidEur),
+              metered: euroLabel(totalMeteredEur),
+              ratio: ratio.toFixed(1),
+            })}
+          </div>
+        </div>
+        <div className="text-right text-[11px] text-[var(--text-dim)]">
+          {t('usage.economy.sinceSingle', { date: firstLabel })}
+          <br />
+          {t('usage.economy.historyDays', { n: spanDays })}
+          {meteredDays > 0 && meteredDays !== spanDays ? (
+            <>
+              {' · '}
+              {t('usage.economy.meteredDays', { n: meteredDays })}
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+        <EconomyRow
+          provider="Claude"
+          plan={subs.claude.plan}
+          paidEur={claudePaidEur}
+          meteredEur={claudeMeteredEur}
+          savingsEur={claudeSavingsEur}
+          tone="cyan"
+        />
+        <EconomyRow
+          provider="Codex"
+          plan={subs.codex.plan}
+          paidEur={codexPaidEur}
+          meteredEur={codexMeteredEur}
+          savingsEur={codexSavingsEur}
+          tone="amber"
+        />
+      </div>
+
+      <div className="mt-3 text-[11px] text-[var(--text-faint)]">
+        {t('usage.economy.basedOnRate', { rate: subs.usdToEur.toFixed(2) })}{' '}
+        <a href="/settings" className="text-[var(--accent)]">
+          {t('usage.economy.settingsLink')}
+        </a>
+        .
+      </div>
+    </div>
+  );
+}
+
+function EconomyRow({
+  provider,
+  plan,
+  paidEur,
+  meteredEur,
+  savingsEur,
+  tone,
+}: {
+  provider: string;
+  plan: string;
+  paidEur: number;
+  meteredEur: number;
+  savingsEur: number;
+  tone: 'cyan' | 'amber';
+}) {
+  const { t } = useTranslation();
+  const accent = tone === 'cyan' ? 'text-[#64d2ff]' : 'text-[#ffd60a]';
+  const savingsTone = savingsEur >= 0 ? 'text-[#30d158]' : 'text-[#ff453a]';
+  const ratio = paidEur > 0 ? meteredEur / paidEur : 0;
+  return (
+    <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2">
+      <div className="flex items-baseline justify-between gap-2">
+        <div>
+          <div className={`text-[13px] font-medium ${accent}`}>{provider}</div>
+          <div className="text-[11px] text-[var(--text-dim)]">{plan}</div>
+        </div>
+        <div className={`num text-[18px] font-semibold ${savingsTone}`}>
+          {savingsEur >= 0 ? '+' : '−'}
+          {euroLabel(Math.abs(savingsEur))}
+        </div>
+      </div>
+      <div className="mt-2 flex flex-col gap-1 text-[12px]">
+        <div className="flex items-center justify-between">
+          <span className="text-[var(--text-dim)]">{t('usage.economyRow.paidCumul')}</span>
+          <span className="num text-[var(--text-mute)]">{euroLabel(paidEur)}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-[var(--text-dim)]">{t('usage.economyRow.ifPayg')}</span>
+          <span className="num text-[var(--text-mute)]">{euroLabel(meteredEur)}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-[var(--text-dim)]">{t('usage.economyRow.ratio')}</span>
+          <span className={`num ${savingsTone}`}>×{ratio.toFixed(1)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type CompactStatTone = 'default' | 'emerald' | 'amber' | 'cyan' | 'rose';
+
+function CompactStatsStrip({
+  items,
+}: {
+  items: Array<{ label: string; value: string; tone?: CompactStatTone; hint?: string }>;
+}) {
+  const toneClass = (tone?: CompactStatTone) => {
+    switch (tone) {
+      case 'emerald':
+        return 'text-[#30d158]';
+      case 'amber':
+        return 'text-[#ffd60a]';
+      case 'cyan':
+        return 'text-[#64d2ff]';
+      case 'rose':
+        return 'text-[#ff453a]';
+      default:
+        return 'text-[var(--text)]';
+    }
+  };
+  return (
+    <div className="grid grid-cols-3 gap-2 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2 sm:grid-cols-6">
+      {items.map((item) => (
+        <div key={item.label} className="min-w-0" title={item.hint || undefined}>
+          <div className="truncate text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+            {item.label}
+          </div>
+          <div
+            className={`num truncate text-[16px] font-semibold tracking-tight ${toneClass(item.tone)}`}
+          >
+            {item.value}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function HourSparkline({
+  data,
+  accent,
+  height = 36,
+}: {
+  data: Array<{ hour: number; value: number }>;
+  accent: string;
+  height?: number;
+}) {
+  if (data.length === 0) {
+    return null;
+  }
+  const max = Math.max(1, ...data.map((d) => d.value));
+  const step = 100 / Math.max(1, data.length);
+  return (
+    <div className="mt-3 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2">
+      <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+        <span>0h</span>
+        <span>12h</span>
+        <span>23h</span>
+      </div>
+      <svg
+        role="img"
+        aria-label="Hourly distribution"
+        className="mt-1 block w-full"
+        viewBox={`0 0 100 ${height}`}
+        preserveAspectRatio="none"
+        style={{ height }}
+      >
+        {data.map((d) => {
+          const h = Math.max(1, Math.round((d.value / max) * (height - 2)));
+          const x = d.hour * step;
+          return (
+            <rect
+              key={d.hour}
+              x={x + step * 0.15}
+              y={height - h}
+              width={step * 0.7}
+              height={h}
+              fill={accent}
+              opacity={d.value === 0 ? 0.15 : 0.85}
+              rx={0.6}
+            />
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function CompactPanel({
+  title,
+  subtitle,
+  action,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2">
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h3 className="truncate text-[12px] font-semibold text-[var(--text)]">{title}</h3>
+          {subtitle ? (
+            <p className="truncate text-[10.5px] text-[var(--text-dim)]">{subtitle}</p>
+          ) : null}
+        </div>
+        {action ? <div className="shrink-0">{action}</div> : null}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function ModelStackBar({
+  items,
+  accent: _accent,
+}: {
+  items: Array<{ model: string; tokens: number }>;
+  accent: string;
+}) {
+  const palette = ['#64d2ff', '#30d158', '#ffd60a', '#bf5af2', '#ff9f0a', '#ff453a'];
+  const total = items.reduce((acc, item) => acc + item.tokens, 0);
+  if (total === 0) {
+    return null;
+  }
+  return (
+    <div>
+      <div className="flex h-2 w-full overflow-hidden rounded bg-[var(--surface-2)]">
+        {items.map((item, idx) => {
+          const pct = (item.tokens / total) * 100;
+          if (pct <= 0) return null;
+          return (
+            <div
+              key={item.model}
+              style={{ width: `${pct}%`, background: palette[idx % palette.length] }}
+              title={`${item.model} · ${numberLabel(item.tokens)}`}
+            />
+          );
+        })}
+      </div>
+      <ul className="mt-2 space-y-1">
+        {items.map((item, idx) => {
+          const pct = (item.tokens / total) * 100;
+          return (
+            <li key={item.model} className="flex items-center justify-between gap-2 text-[11.5px]">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span
+                  className="inline-block h-2 w-2 shrink-0 rounded-sm"
+                  style={{ background: palette[idx % palette.length] }}
+                />
+                <span className="truncate text-[var(--text)]">{item.model}</span>
+              </span>
+              <span className="flex shrink-0 items-center gap-2 text-[var(--text-dim)]">
+                <span className="num">{numberLabel(item.tokens)}</span>
+                <span className="num text-[var(--text-mute)]">{pct.toFixed(1)}%</span>
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function ToolsList({
+  tools,
+  accent,
+}: {
+  tools: ToolUsageRow[];
+  accent: string;
+}) {
+  if (tools.length === 0) {
+    return null;
+  }
+  const max = Math.max(1, ...tools.map((t) => t.count));
+  return (
+    <ul className="space-y-1">
+      {tools.map((tool) => {
+        const width = Math.max(4, Math.round((tool.count / max) * 100));
+        return (
+          <li key={tool.name} className="flex items-center gap-2 text-[11.5px]">
+            <span className="w-28 shrink-0 truncate text-[var(--text)]" title={tool.name}>
+              {tool.name}
+            </span>
+            <span className="relative h-1.5 flex-1 rounded bg-[var(--surface-2)]">
+              <span
+                className={`absolute inset-y-0 left-0 rounded ${accent}`}
+                style={{ width: `${width}%` }}
+              />
+            </span>
+            <span className="num w-12 shrink-0 text-right text-[var(--text-dim)]">
+              {tool.count}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function ClaudeAnalytics({
+  byProject,
+  byModel,
+  hourly,
+  toolUsage,
+  selectedProjectRef,
+  setSelectedProjectRef,
+  selectedProject,
+  isToolUsageLoading,
+  toolUsageError,
+}: {
+  byProject: ProjectUsageRow[];
+  byModel: ModelUsageRow[];
+  hourly: HourDistributionRow[];
+  toolUsage: ToolUsageRow[];
+  selectedProjectRef: string;
+  setSelectedProjectRef: (value: string) => void;
+  selectedProject: ProjectUsageRow | null;
+  isToolUsageLoading: boolean;
+  toolUsageError: string | null;
+}) {
+  const { t } = useTranslation();
+
+  const totals = byProject.reduce(
+    (acc, row) => {
+      acc.inputTokens += row.inputTokens;
+      acc.outputTokens += row.outputTokens;
+      acc.cacheRead += row.cacheRead;
+      acc.cacheCreate += row.cacheCreate;
+      acc.sessions += row.sessions;
+      acc.assistantMessages += row.assistantMessages;
+      acc.userMessages += row.userMessages;
+      return acc;
+    },
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheRead: 0,
+      cacheCreate: 0,
+      sessions: 0,
+      assistantMessages: 0,
+      userMessages: 0,
+    },
+  );
+  const avgOutput =
+    totals.assistantMessages > 0 ? totals.outputTokens / totals.assistantMessages : 0;
+  const cachePct =
+    totals.cacheRead + totals.inputTokens > 0
+      ? (totals.cacheRead / (totals.cacheRead + totals.inputTokens)) * 100
+      : 0;
+
+  const models = byModel.slice(0, 6).map((row) => ({
+    model: row.model,
+    tokens: row.inputTokens + row.outputTokens + row.cacheRead + row.cacheCreate,
+  }));
+
+  return (
+    <>
+      {toolUsageError ? (
+        <div className="mb-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+          {toolUsageError}
+        </div>
+      ) : null}
+
+      <CompactStatsStrip
+        items={[
+          { label: t('usage.metricLines.projectsShort'), value: String(byProject.length) },
+          { label: 'Sessions', value: numberLabel(totals.sessions) },
+          { label: t('usage.metricLines.replies'), value: numberLabel(totals.assistantMessages) },
+          { label: t('usage.metricLines.userPrompts'), value: numberLabel(totals.userMessages) },
+          {
+            label: t('usage.metricLines.reuseRatio'),
+            value: percentLabel(cachePct),
+            tone: 'emerald',
+          },
+          { label: 'Output/reply', value: numberLabel(avgOutput), tone: 'amber' },
+        ]}
+      />
+
+      <HourSparkline
+        data={hourly.map((h) => ({ hour: h.hour, value: h.tokens }))}
+        accent="#22d3ee"
+      />
+
+      <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+        <CompactPanel
+          title={t('usage.panels.modelMix')}
+          subtitle={t('usage.panels.modelMixClaudeSub')}
+        >
+          {models.length === 0 ? (
+            <EmptyBlock message={t('usage.empty.models')} />
+          ) : (
+            <ModelStackBar items={models} accent="#10b981" />
+          )}
+        </CompactPanel>
+
+        <CompactPanel
+          title={t('usage.panels.toolUsage')}
+          subtitle={t('usage.panels.toolUsageClaudeSub')}
+          action={
+            <select
+              aria-label="Projet"
+              className="max-w-[200px] rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-200"
+              value={selectedProjectRef}
+              onChange={(event) => setSelectedProjectRef(event.target.value)}
+              disabled={byProject.length === 0}
+            >
+              {byProject.length === 0 ? (
+                <option value="">{t('usage.empty.projectNone')}</option>
+              ) : null}
+              {byProject.map((row) => (
+                <option key={projectSelectorValue(row)} value={projectSelectorValue(row)}>
+                  {shortProjectName(row)}
+                </option>
+              ))}
+            </select>
+          }
+        >
+          {selectedProject ? (
+            <p className="mb-1.5 truncate text-[10.5px] text-slate-500">
+              {shortProjectName(selectedProject)} · {numberLabel(selectedProject.totalTokens)} tok ·{' '}
+              {selectedProject.assistantMessages} replies · {selectedProject.sessions} sess
+            </p>
+          ) : null}
+          {isToolUsageLoading ? (
+            <EmptyBlock message={t('common.loading')} />
+          ) : toolUsage.length === 0 ? (
+            <EmptyBlock message={t('usage.empty.toolsUsage')} />
+          ) : (
+            <ToolsList tools={toolUsage.slice(0, 8)} accent="bg-cyan-400" />
+          )}
+        </CompactPanel>
+      </div>
+    </>
+  );
+}
+
+function CodexAnalytics({
+  byProject,
+  byModel,
+  hourly,
+  tools,
+  rateLimits,
+  selectedProjectRef,
+  setSelectedProjectRef,
+  isLoading,
+  isToolsLoading,
+  error,
+  toolsError,
+}: {
+  byProject: CodexProjectUsageRow[];
+  byModel: CodexModelUsageRow[];
+  hourly: CodexHourDistributionRow[];
+  tools: ToolUsageRow[];
+  rateLimits: CodexRateLimitsPayload['rateLimits'];
+  selectedProjectRef: string;
+  setSelectedProjectRef: (value: string) => void;
+  isLoading: boolean;
+  isToolsLoading: boolean;
+  error: string | null;
+  toolsError: string | null;
+}) {
+  const { t } = useTranslation();
+  const selected = byProject.find((row) => projectSelectorValue(row) === selectedProjectRef);
+
+  const totals = byProject.reduce(
+    (acc, row) => {
+      acc.tokens += row.totalTokens;
+      acc.turns += row.turns;
+      acc.sessions += row.sessions;
+      acc.input += row.inputTokens;
+      acc.cached += row.cachedInputTokens;
+      acc.reasoning += row.reasoningOutputTokens;
+      return acc;
+    },
+    { tokens: 0, turns: 0, sessions: 0, input: 0, cached: 0, reasoning: 0 },
+  );
+  const cacheRatio = totals.input > 0 ? (totals.cached / totals.input) * 100 : 0;
+
+  const models = byModel.slice(0, 6).map((row) => ({
+    model: row.model,
+    tokens: row.totalTokens,
+  }));
+
+  return (
+    <>
+      {error ? (
+        <div className="mb-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+          {error}
+        </div>
+      ) : null}
+
+      {isLoading ? (
+        <p className="mb-2 text-[11px] text-[var(--text-dim)]">
+          {t('usage.analytics.codexLoading')}
+        </p>
+      ) : null}
+
+      <CompactStatsStrip
+        items={[
+          { label: t('usage.metricLines.projectsShort'), value: String(byProject.length) },
+          { label: 'Sessions', value: numberLabel(totals.sessions) },
+          { label: 'Turns', value: numberLabel(totals.turns) },
+          { label: 'Tokens', value: numberLabel(totals.tokens) },
+          {
+            label: t('usage.metricLines.cacheHitRatio'),
+            value: percentLabel(cacheRatio),
+            tone: 'emerald',
+          },
+          { label: 'Reasoning', value: numberLabel(totals.reasoning), tone: 'amber' },
+        ]}
+      />
+
+      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+        <RateLimitRow
+          label={t('usage.metricLines.limit5h')}
+          rate={rateLimits?.primary || null}
+          planType={rateLimits?.planType || null}
+          observedAt={rateLimits?.observedAt || null}
+          tone="cyan"
+        />
+        <RateLimitRow
+          label={t('usage.metricLines.limit7d')}
+          rate={rateLimits?.secondary || null}
+          planType={rateLimits?.planType || null}
+          observedAt={rateLimits?.observedAt || null}
+          tone="amber"
+        />
+      </div>
+
+      <HourSparkline
+        data={hourly.map((h) => ({ hour: h.hour, value: h.tokens }))}
+        accent="#ffd60a"
+      />
+
+      <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+        <CompactPanel
+          title={t('usage.panels.modelMix')}
+          subtitle={t('usage.panels.modelMixCodexSub')}
+        >
+          {models.length === 0 ? (
+            <EmptyBlock message={t('usage.empty.modelsCodex')} />
+          ) : (
+            <ModelStackBar items={models} accent="#ffd60a" />
+          )}
+        </CompactPanel>
+
+        <CompactPanel
+          title={t('usage.panels.toolUsage')}
+          subtitle={t('usage.panels.toolUsageCodexSub')}
+          action={
+            <select
+              aria-label="Projet"
+              id="codex-project-tool-filter"
+              className="max-w-[200px] rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-200"
+              value={selectedProjectRef}
+              onChange={(event) => setSelectedProjectRef(event.target.value)}
+              disabled={byProject.length === 0}
+            >
+              {byProject.length === 0 ? (
+                <option value="">{t('usage.empty.projectNone')}</option>
+              ) : null}
+              {byProject.map((row) => (
+                <option key={projectSelectorValue(row)} value={projectSelectorValue(row)}>
+                  {shortProjectName(row)}
+                </option>
+              ))}
+            </select>
+          }
+        >
+          {selected ? (
+            <p className="mb-1.5 truncate text-[10.5px] text-slate-500">
+              {shortProjectName(selected)} · {numberLabel(selected.totalTokens)} tok ·{' '}
+              {selected.turns} turns · {selected.sessions} sess
+            </p>
+          ) : null}
+          {toolsError ? (
+            <div className="mb-2 rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-xs text-red-200">
+              {toolsError}
+            </div>
+          ) : null}
+          {isToolsLoading ? (
+            <EmptyBlock message={t('common.loading')} />
+          ) : tools.length === 0 ? (
+            <EmptyBlock message={t('usage.empty.toolsUsage')} />
+          ) : (
+            <ToolsList tools={tools.slice(0, 8)} accent="bg-amber-400" />
+          )}
+        </CompactPanel>
+      </div>
+    </>
+  );
+}
+
+function RateLimitRow({
+  label,
+  rate,
+  planType,
+  observedAt,
+  tone,
+}: {
+  label: string;
+  rate: { usedPercent: number; windowMinutes: number; resetsAt: number } | null;
+  planType: string | null;
+  observedAt: number | null;
+  tone: ProviderTone;
+}) {
+  const { t } = useTranslation();
+  const accent =
+    tone === 'cyan'
+      ? { bar: 'bg-[#64d2ff]', value: 'text-[#64d2ff]', border: 'border-[rgba(100,210,255,0.28)]' }
+      : { bar: 'bg-[#ffd60a]', value: 'text-[#ffd60a]', border: 'border-[rgba(255,214,10,0.28)]' };
+
+  if (!rate) {
+    return (
+      <div
+        className={`rounded-[var(--radius)] border ${accent.border} bg-[var(--surface-1)] px-3 py-2`}
+      >
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+            {label}
+          </span>
+          <span className="num text-[14px] text-[var(--text-mute)]">n/a</span>
+        </div>
+        <div className="mt-1 text-[10.5px] text-[var(--text-dim)]">
+          {t('usage.metricLines.limitNotObserved')}
+        </div>
+      </div>
+    );
+  }
+
+  const clamped = Math.max(0, Math.min(100, rate.usedPercent));
+  const resetsLabel = rate.resetsAt
+    ? new Date(rate.resetsAt * 1000).toLocaleString(dateLocale(currentLocale()))
+    : 'n/a';
+
+  return (
+    <div
+      className={`rounded-[var(--radius)] border ${accent.border} bg-[var(--surface-1)] px-3 py-2`}
+      title={
+        observedAt
+          ? new Date(observedAt * 1000).toLocaleString(dateLocale(currentLocale()))
+          : undefined
+      }
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+          {label}
+        </span>
+        <span className={`num text-[16px] font-semibold ${accent.value}`}>
+          {rate.usedPercent.toFixed(1)}%
+        </span>
+      </div>
+      <div className="mt-1.5 h-1.5 rounded bg-[var(--surface-2)]">
+        <div className={`h-1.5 rounded ${accent.bar}`} style={{ width: `${clamped}%` }} />
+      </div>
+      <div className="mt-1 flex items-center justify-between text-[10.5px] text-[var(--text-dim)]">
+        <span>{planType || '—'}</span>
+        <span className="truncate">reset · {resetsLabel}</span>
+      </div>
+    </div>
+  );
+}
