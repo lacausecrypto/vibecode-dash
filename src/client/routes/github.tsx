@@ -517,13 +517,36 @@ export default function GithubRoute() {
     // Semaine / Mois" reste significatif même quand GitHub publie avec 24-48h
     // de retard (traffic). Clamp à today: heatmap.days est paddé jusqu'au 31
     // décembre avec count=0, donc sans clamp le latest tomberait sur Dec 31.
+    //
+    // `skipPendingToday` is set when a zero row for today is likely *pending*
+    // aggregation rather than a real zero (GitHub traffic is aggregated at
+    // UTC midnight + ~24h latency; a manual sync run mid-day inserts a
+    // today-row at 0 that flashes -100% until GitHub catches up). Falls
+    // back to the most recent non-zero day so the "1J" KPI stays meaningful.
+    // Not applied to the contribution heatmap — a zero-contrib day is a
+    // genuine zero, not pending data.
     const todayIso = new Date().toISOString().slice(0, 10);
-    const computeDelta = (series: Array<{ date: string; count: number }>) => {
-      const latest =
-        series.reduce(
-          (max, row) => (row.date <= todayIso && row.date > max ? row.date : max),
-          '',
-        ) || todayIso;
+    const computeDelta = (
+      series: Array<{ date: string; count: number }>,
+      skipPendingToday = false,
+    ) => {
+      const maxDateSeen = series.reduce(
+        (max, row) => (row.date <= todayIso && row.date > max ? row.date : max),
+        '',
+      );
+      let latest = maxDateSeen || todayIso;
+
+      if (skipPendingToday && latest === todayIso) {
+        const todayRow = series.find((r) => r.date === todayIso);
+        if (todayRow && todayRow.count === 0) {
+          const fallback = series.reduce(
+            (max, row) => (row.date < todayIso && row.count > 0 && row.date > max ? row.date : max),
+            '',
+          );
+          if (fallback) latest = fallback;
+        }
+      }
+
       const currentEnd = latest;
       const currentStart = addDays(latest, -(deltaWindowDays - 1));
       const previousEnd = addDays(currentStart, -1);
@@ -551,8 +574,8 @@ export default function GithubRoute() {
 
     return {
       contrib: computeDelta(contribSeries),
-      views: computeDelta(toSeries(viewsSeries)),
-      clones: computeDelta(toSeries(clonesSeries)),
+      views: computeDelta(toSeries(viewsSeries), true),
+      clones: computeDelta(toSeries(clonesSeries), true),
     };
   }, [heatmap, trafficSeries, deltaWindowDays]);
 
