@@ -8,7 +8,7 @@
 
 > *The local-first dashboard for the vibe-coding era.*
 
-A 127.0.0.1 app that turns your LLM CLI sessions, your Git repos, and your Obsidian vault into one observable, writable surface. Built for solo devs who code *with* Claude Code and Codex, and still care about what they ship, what it costs, and what they learn along the way.
+A dashboard that turns your LLM CLI sessions, your Git repos, and your Obsidian vault into one observable, writable surface. Built for solo devs who code *with* Claude Code and Codex, and still care about what they ship, what it costs, and what they learn along the way.
 
 ```bash
 bunx vibecode-dash     # one-shot, no clone, no account
