@@ -2,7 +2,6 @@
 
 [![npm version](https://img.shields.io/npm/v/vibecode-dash?color=cb3837&logo=npm)](https://www.npmjs.com/package/vibecode-dash)
 [![npm downloads (total)](https://img.shields.io/npm/dt/vibecode-dash?color=cb3837&logo=npm&label=downloads)](https://www.npmjs.com/package/vibecode-dash)
-[![npm downloads (monthly)](https://img.shields.io/npm/dm/vibecode-dash?color=cb3837&logo=npm&label=monthly)](https://www.npmjs.com/package/vibecode-dash)
 [![CI](https://github.com/lacausecrypto/vibecode-dash/actions/workflows/ci.yml/badge.svg)](https://github.com/lacausecrypto/vibecode-dash/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/npm/l/vibecode-dash?color=blue)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/lacausecrypto/vibecode-dash?style=social)](https://github.com/lacausecrypto/vibecode-dash)
