@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — Presence Copilot scoring
+
+- **Batch scoring**: `scoreCandidatesBatch()` rates up to 8 candidates per
+  CLI call instead of one. Persona + vault context (~2-3 k tokens) is
+  built once per batch and shared, replacing N cold starts with one.
+  Three-tier failure handling: whole-batch failure → fall back to
+  per-candidate `scoreCandidate`; JSON parse failure → same fallback;
+  partial batch (model dropped K of N) → re-score the K missing
+  candidates individually and stitch back into the slot table. Wired
+  into both X and Reddit scanners; dedup against existing drafts now
+  happens before the batch call so duplicates never count toward batch
+  input.
+- **Tighter X engagement floor**: pre-CLI filter raised from
+  `like ≥ 1 OR reply ≥ 1` to `like ≥ 3 OR reply ≥ 2`. Live data showed
+  ~50 % of candidates with 0-2 likes never crossed the 0.70 score bar,
+  burning ~15 s of CLI per item to filter what an integer comparison
+  kills in microseconds.
+
+**Live measurement** on the same 9-source X-only scan workload
+(identical sources, bypassTtl, fresh DB state):
+
+| | Before | After | Delta |
+|---|---|---|---|
+| Wall-clock | 1257 s (21 min) | **265 s (4 min 25 s)** | **4.7× faster** |
+| CLI scoring calls | ~80 | 10 (8 batch + 2 single fallback) | ~8× fewer |
+| Candidates scored | ~80 | 40 | ½ (engagement floor) |
+
+12 unit tests added in `presenceDrafter.test.ts` covering
+`extractJsonArray()` edge cases (fenced, bare, commentary-wrapped,
+malformed, object-shaped, empty, over-emit, multi-block input).
+
 ## [0.2.0] — 2026-04-25
 
 Second release. Adds the **Presence Copilot** social workflow, a system-wide
