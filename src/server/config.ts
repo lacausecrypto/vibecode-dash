@@ -88,6 +88,14 @@ const SettingsSchema = z.object({
       // background activity at all. Manual /engagement-poll-now bypasses
       // this flag the same way scan-now bypasses TTL.
       engagementPollEnabled: z.boolean().default(true),
+      // Override list for the X tweet quality scorer's curated-author boost.
+      // When set (non-empty), this list REPLACES the built-in default
+      // (`DEFAULT_HIGH_VALUE_HANDLES` in `lib/tweetQuality.ts`) — letting
+      // the user point the +0.15 quality bump at their own niche (data
+      // engineering, VC, fintech, …) without editing source. Handles are
+      // stored without `@` and lowercased on read. Empty / unset =
+      // built-in AI-and-indie-dev list.
+      highValueAuthorHandles: z.array(z.string()).default([]),
     })
     .default({
       drafterProvider: 'claude',
@@ -97,6 +105,7 @@ const SettingsSchema = z.object({
       autoScanEnabled: false,
       dailyBudgetUsd: 0.5,
       engagementPollEnabled: true,
+      highValueAuthorHandles: [],
     }),
   subscriptions: z
     .object({
@@ -149,6 +158,7 @@ function buildDefaults(): Settings {
       autoScanEnabled: false,
       dailyBudgetUsd: 0.5,
       engagementPollEnabled: true,
+      highValueAuthorHandles: [],
     },
     subscriptions: {
       usdToEur: 0.93,

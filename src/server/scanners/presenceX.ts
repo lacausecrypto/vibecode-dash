@@ -8,6 +8,7 @@ import {
   updateDraftBody,
 } from '../lib/presence';
 import { classifyImageNeed, generateDraft, scoreCandidatesBatch } from '../lib/presenceDrafter';
+import { rankTweetsByQuality } from '../lib/tweetQuality';
 import {
   type XTweet,
   buildTopicQuery,
@@ -33,30 +34,42 @@ import {
  * The scanner NEVER fetches conversation threads on its own — that's a
  * separate expansion only triggered once a candidate passes scoring, to
  * avoid spending reads on threads that won't convert.
+ *
+ * Pre-CLI quality gate (`tweetQuality.ts`): each fetched tweet gets a
+ * composite quality score from engagement velocity, author reach, author
+ * quality (bio + verified_type), content quality, and a curated-handle
+ * boost. Tweets below `MIN_QUALITY_SCORE` are dropped before any Haiku
+ * call. The gate replaces a prior simpler `like ≥ 3 OR reply ≥ 2` floor:
+ * the same single fetch now also pulls `user.fields=public_metrics,
+ * verified,verified_type,description` so author signals don't cost an
+ * extra read. After ranking, the top `MAX_CANDIDATES_PER_SOURCE = 8`
+ * candidates go to scoring — that's exactly one batch worth, so the X-only
+ * scan never spends more than 1 batch CLI call per source for relevance.
  */
 const SCORE_THRESHOLD = 0.7; // X is costlier than Reddit, we raise the bar
 const MIN_TWEET_AGE_SEC = 120;
 const MAX_TWEET_AGE_SEC = 24 * 3600;
-const MAX_CANDIDATES_PER_SOURCE = 15;
 
 /**
- * Pre-CLI engagement filter. Tweets that fail this floor are dropped before
- * we spend a Haiku score call on them. Raised from `like ≥ 1 OR reply ≥ 1`
- * after live timing showed ~50 % of candidates with 0-2 likes never crossed
- * the 0.70 score bar — we were paying ~15 s of CLI per call to filter them
- * via the model when an integer comparison kills them in microseconds.
- *
- * Conservative tier: keeps any tweet with mid-low engagement that suggests
- * a real conversation (≥ 2 replies) or modest validation (≥ 3 likes). Pure
- * 0-engagement throwaways and 1-like bot replies are dropped.
+ * Cap on candidates passed to CLI scoring per source. Tuned to match the
+ * batch size of `scoreCandidatesBatch` (8) so a typical source scans in
+ * one batch call. Quality ranking guarantees the 8 retained are the
+ * highest-quality of the fetched window.
  */
-const MIN_LIKES_FOR_SCORING = 3;
-const MIN_REPLIES_FOR_SCORING = 2;
+const MAX_CANDIDATES_PER_SOURCE = 8;
 
 export type XScanOutcome = {
   source_id: string;
   reads: number;
   candidates_seen: number;
+  /** Tweets dropped by the quality gate before any CLI call. Distinguishes
+   *  "we never scored" from "scored low" — the former saves all the CLI
+   *  cost, the latter still spent a Haiku call. */
+  skipped_low_quality: number;
+  /** Tweets dropped by the age window (too fresh to have signal, or too old
+   *  to be relevant). Counted separately so the UI can suggest broadening
+   *  the window if it's eating most of the funnel. */
+  skipped_age_window: number;
   scored: number;
   drafts_created: number;
   skipped_duplicate: number;
@@ -122,6 +135,8 @@ export async function scanXSource(
     source_id: source.id,
     reads: 0,
     candidates_seen: 0,
+    skipped_low_quality: 0,
+    skipped_age_window: 0,
     scored: 0,
     drafts_created: 0,
     skipped_duplicate: 0,
@@ -162,27 +177,50 @@ export async function scanXSource(
   const now = nowSec();
   const ttlSec = source.freshness_ttl_minutes * 60;
 
-  const fresh = fetched.tweets.filter((t) => {
+  // Stage 0a — age window + retweet exclusion. These are hard structural
+  // gates (we never want a 5-second-old tweet with no engagement, or a
+  // pure retweet which has no original take to engage with). Tracked
+  // separately in the outcome so the UI can surface "X tweets aged out"
+  // without polluting the quality-gate counter.
+  const eligibleByAge: XTweet[] = [];
+  for (const t of fetched.tweets) {
     const createdSec = Math.floor(new Date(t.created_at).getTime() / 1000);
     const age = now - createdSec;
-    if (age < MIN_TWEET_AGE_SEC || age > MAX_TWEET_AGE_SEC) return false;
-    // skip retweets/replies even if the API didn't filter them for us
-    if (t.referenced_tweets?.some((r) => r.type === 'retweeted')) return false;
-    // Engagement floor — kills bots / 0-interaction throwaways before they
-    // burn a 15 s Haiku score call. Either real likes (validation signal)
-    // OR genuine reply conversation (engagement signal). The Claude scorer
-    // still does the heavy noise filtering for what gets through.
-    return (
-      t.public_metrics.like_count >= MIN_LIKES_FOR_SCORING ||
-      t.public_metrics.reply_count >= MIN_REPLIES_FOR_SCORING
-    );
+    if (age < MIN_TWEET_AGE_SEC || age > MAX_TWEET_AGE_SEC) {
+      outcome.skipped_age_window += 1;
+      continue;
+    }
+    if (t.referenced_tweets?.some((r) => r.type === 'retweeted')) continue;
+    eligibleByAge.push(t);
+  }
+
+  // Stage 0b — composite quality gate. Pulls author follower count + bio
+  // + verified_type + curated-handle list to score each tweet. Drops any
+  // tweet below `MIN_QUALITY_SCORE` and ranks the survivors so the highest-
+  // quality go through CLI scoring first. See `tweetQuality.ts` for
+  // weights + threshold rationale.
+  //
+  // The custom handle list (`settings.presence.highValueAuthorHandles`)
+  // overrides the built-in default when set — letting the user point the
+  // boost at their own niche (e.g. data engineering, VC, fintech) without
+  // editing code.
+  const customHandles = settings.presence?.highValueAuthorHandles;
+  const highValueHandles =
+    customHandles && customHandles.length > 0
+      ? new Set(customHandles.map((h) => h.toLowerCase().replace(/^@/, '')))
+      : undefined;
+  const ranked = rankTweetsByQuality(eligibleByAge, {
+    nowSec: now,
+    maxResults: MAX_CANDIDATES_PER_SOURCE,
+    highValueHandles,
   });
+  outcome.skipped_low_quality = eligibleByAge.length - ranked.length;
 
   // Dedup BEFORE scoring so duplicate tweets never enter the batch. This
   // also keeps the cost ledger honest: a batch only counts the candidates
   // it actually rated, not the ones already drafted from a previous run.
   const candidates: { tweet: XTweet; candidate: ReturnType<typeof tweetToCandidate> }[] = [];
-  for (const tweet of fresh.slice(0, MAX_CANDIDATES_PER_SOURCE)) {
+  for (const { tweet } of ranked) {
     if (rowExistsForTweet(db, tweet.id)) {
       outcome.skipped_duplicate += 1;
       continue;

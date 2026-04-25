@@ -89,11 +89,33 @@ async function xGet<T>(path: string, query: Record<string, string | number> = {}
 
 // ───────────────────────── Models ─────────────────────────
 
+export type XTweetAuthor = {
+  /** Display name (e.g. "Sam Altman"). Optional — falls back to handle. */
+  name?: string;
+  /** Followers count. Proxy for reach / influence. May be 0 on private/new accounts. */
+  followers_count: number;
+  /** Self-described bio. Used to detect CEO/founder/researcher signals
+   *  ("CEO of X", "Co-founder", "ML researcher at Y"). */
+  description?: string;
+  /** Has a paid blue check OR legacy verification. Both are imperfect signals
+   *  (paid Blue does NOT mean notable), but verified=false rules out a chunk
+   *  of bot/throwaway accounts. */
+  verified?: boolean;
+  /** Returned by user.fields=verified_type when present: 'blue' | 'business' |
+   *  'government' | 'none'. Lets the scorer distinguish paid Blue (weak signal)
+   *  from business/government verifications (strong signal). */
+  verified_type?: 'blue' | 'business' | 'government' | 'none';
+};
+
 export type XTweet = {
   id: string;
   text: string;
   author_id: string;
   author_username?: string;
+  /** Author profile data attached when the API request includes
+   *  `user.fields=public_metrics,verified,verified_type,description`.
+   *  Same X API call, no additional read cost — see TWEET_FIELDS / USER_FIELDS. */
+  author?: XTweetAuthor;
   created_at: string; // ISO
   lang?: string;
   public_metrics: {
@@ -122,7 +144,20 @@ type TweetResponse = {
     referenced_tweets?: Array<{ type: string; id: string }>;
   }>;
   includes?: {
-    users?: Array<{ id: string; username: string; name: string }>;
+    users?: Array<{
+      id: string;
+      username: string;
+      name: string;
+      description?: string;
+      verified?: boolean;
+      verified_type?: 'blue' | 'business' | 'government' | 'none';
+      public_metrics?: {
+        followers_count?: number;
+        following_count?: number;
+        tweet_count?: number;
+        listed_count?: number;
+      };
+    }>;
   };
   meta?: {
     result_count: number;
@@ -134,28 +169,56 @@ type TweetResponse = {
 
 const TWEET_FIELDS =
   'id,text,author_id,created_at,lang,public_metrics,conversation_id,in_reply_to_user_id,referenced_tweets';
+const USER_FIELDS = 'public_metrics,verified,verified_type,description';
 const EXPANSIONS = 'author_id';
 
 function mergeAuthors(res: TweetResponse): XTweet[] {
-  const authors = new Map<string, string>();
-  for (const u of res.includes?.users ?? []) authors.set(u.id, u.username);
-  return (res.data ?? []).map((t) => ({
-    id: t.id,
-    text: t.text,
-    author_id: t.author_id,
-    author_username: authors.get(t.author_id),
-    created_at: t.created_at,
-    lang: t.lang,
-    public_metrics: t.public_metrics ?? {
-      retweet_count: 0,
-      reply_count: 0,
-      like_count: 0,
-      quote_count: 0,
-    },
-    conversation_id: t.conversation_id,
-    in_reply_to_user_id: t.in_reply_to_user_id,
-    referenced_tweets: t.referenced_tweets,
-  }));
+  // Build author map from `includes.users` — same response, zero extra cost.
+  // Without USER_FIELDS the public_metrics/verified/description blocks are
+  // missing, but the scorer falls back to safe defaults (followers=0,
+  // verified=undefined). Authors absent from `includes` (rare, but the API
+  // does it for protected accounts) end up with `author=undefined`.
+  const authorMap = new Map<string, XTweetAuthor & { username: string }>();
+  for (const u of res.includes?.users ?? []) {
+    authorMap.set(u.id, {
+      name: u.name,
+      followers_count: u.public_metrics?.followers_count ?? 0,
+      description: u.description,
+      verified: u.verified,
+      verified_type: u.verified_type,
+      username: u.username,
+    });
+  }
+
+  return (res.data ?? []).map((t) => {
+    const a = authorMap.get(t.author_id);
+    return {
+      id: t.id,
+      text: t.text,
+      author_id: t.author_id,
+      author_username: a?.username,
+      author: a
+        ? {
+            name: a.name,
+            followers_count: a.followers_count,
+            description: a.description,
+            verified: a.verified,
+            verified_type: a.verified_type,
+          }
+        : undefined,
+      created_at: t.created_at,
+      lang: t.lang,
+      public_metrics: t.public_metrics ?? {
+        retweet_count: 0,
+        reply_count: 0,
+        like_count: 0,
+        quote_count: 0,
+      },
+      conversation_id: t.conversation_id,
+      in_reply_to_user_id: t.in_reply_to_user_id,
+      referenced_tweets: t.referenced_tweets,
+    };
+  });
 }
 
 // ───────────────────────── Read endpoints ─────────────────────────
@@ -167,6 +230,7 @@ export async function getListTimeline(
   const res = await xGet<TweetResponse>(`/lists/${encodeURIComponent(listId)}/tweets`, {
     max_results: Math.min(100, Math.max(5, opts.maxResults ?? 50)),
     'tweet.fields': TWEET_FIELDS,
+    'user.fields': USER_FIELDS,
     expansions: EXPANSIONS,
   });
   return mergeAuthors(res);
@@ -179,6 +243,7 @@ export async function getUserTimeline(
   const res = await xGet<TweetResponse>(`/users/${encodeURIComponent(userId)}/tweets`, {
     max_results: Math.min(100, Math.max(5, opts.maxResults ?? 20)),
     'tweet.fields': TWEET_FIELDS,
+    'user.fields': USER_FIELDS,
     expansions: EXPANSIONS,
     exclude: 'retweets,replies',
   });
@@ -193,6 +258,7 @@ export async function searchRecent(
     query,
     max_results: Math.min(100, Math.max(10, opts.maxResults ?? 20)),
     'tweet.fields': TWEET_FIELDS,
+    'user.fields': USER_FIELDS,
     expansions: EXPANSIONS,
   });
   return mergeAuthors(res);
@@ -205,6 +271,7 @@ export async function getTweetById(id: string): Promise<XTweet | null> {
       includes?: TweetResponse['includes'];
     }>(`/tweets/${encodeURIComponent(id)}`, {
       'tweet.fields': TWEET_FIELDS,
+      'user.fields': USER_FIELDS,
       expansions: EXPANSIONS,
     });
     if (!res.data) return null;

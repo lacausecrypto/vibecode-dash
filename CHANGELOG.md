@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Quality — Stricter X tweet pre-CLI filtering
+
+The X scanner now scores every fetched tweet on a composite quality
+function (`lib/tweetQuality.ts`) and drops anything below
+`MIN_QUALITY_SCORE = 0.40` before reaching the Haiku scorer. The same
+single API request now also pulls
+`user.fields=public_metrics,verified,verified_type,description` —
+zero extra read cost, full author signal for ranking.
+
+Five components, weighted to favour the AI / indie-dev workflow this
+dashboard targets:
+- **Engagement velocity (35 %)** — weighted interactions per hour
+  (replies × 3, retweets × 2, likes × 1). Saturates at 200 wgt/h.
+- **Author reach (20 %)** — log-normalized follower count, saturates
+  at 1 M.
+- **Author quality (20 %)** — bio keywords (CEO/founder/researcher/
+  professor/at <BigCo>) + X `verified_type` (business/government
+  strong, paid Blue zero, legacy true small bump).
+- **Content quality (10 %)** — text length post-URL-strip, sentence
+  count, mention spam + ALL-CAPS penalties.
+- **Curated authors boost (15 %)** — flat `+0.15` for handles in a
+  hand-picked default list (~50 entries: AI lab leadership,
+  prominent researchers, infrastructure CEOs, indie builders).
+  Override per install via `settings.presence.highValueAuthorHandles`.
+
+Tweets above the threshold are RANKED by score and capped at
+`MAX_CANDIDATES_PER_SOURCE = 8` — exactly one batch worth of CLI
+scoring per source. The ranking matters: when a fetch returns 30
+candidates that all pass the threshold, the top 8 are guaranteed to
+be the highest-quality, not just the first 8.
+
+The outcome shape gains two counters:
+- `skipped_age_window` — tweets dropped by the age gate (too fresh to
+  have signal, or too old to be relevant).
+- `skipped_low_quality` — tweets dropped by the quality scorer
+  before any CLI call. Distinguished from `skipped_low_score` (which
+  cost a Haiku call) so the UI can surface "filter saved you N
+  CLI calls" honestly.
+
+**Live measurement** on the same 9-source X-only workload, identical
+sources, fresh DB state on both runs:
+
+|                            | Engagement floor only   | Composite quality filter |
+|----------------------------|-------------------------|--------------------------|
+| Wall-clock                 | 265 s (4 min 25 s)      | 278 s (4 min 38 s)       |
+| Tweets fetched             | 202                     | 202                      |
+| Pre-CLI quality drops      | 0 (no quality filter)   | **115** (57 %)           |
+| CLI scoring calls          | 10                      | 9                        |
+| Candidates scored          | 40                      | **26** (–35 %)           |
+| Drafts produced            | 1                       | **3** (+200 %)           |
+
+The wall-clock looks flat because the new run produced **3× more
+drafts** (3 drafts × ~30 s Sonnet drafting). At-conversion-comparable,
+the funnel is ~25 % faster. The real win is the conversion ratio:
+3/26 = 11.5 % drafts-per-CLI-call vs 1/40 = 2.5 % — a **4.6× higher
+useful-output-per-CLI-spend**.
+
+32 unit tests in `tweetQuality.test.ts` cover all five component
+scorers, the composite, and the ranking helper (threshold filtering,
+maxResults capping, custom handle overrides).
+
 ### Performance — Presence Copilot scoring
 
 - **Batch scoring**: `scoreCandidatesBatch()` rates up to 8 candidates per
