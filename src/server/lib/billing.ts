@@ -52,7 +52,12 @@ function chargeCoverage(
 
 /**
  * Returns the effective daily subscription rate (€/day) on a given day for a source.
- * If several charges overlap that day (shouldn't happen normally, but robust), they sum.
+ *
+ * Overlap rule: if multiple charges cover the same day (typical when a new
+ * charge lands before the previous coverage expires — e.g. Max x5 still
+ * running when Max x20 is debited 3 days later), only the **most recent**
+ * charge's rate applies. Summing would double-count during plan transitions
+ * and inflate per-project attribution by 50–100 % across those 3–5 days.
  */
 export function dailyRateOnDate(
   charges: BillingCharge[],
@@ -63,18 +68,15 @@ export function dailyRateOnDate(
     return 0;
   }
   const sorted = [...charges].sort((a, b) => a.date.localeCompare(b.date));
-  const dayStart = dateIsoToTs(dateIso);
-  const dayMid = dayStart + DAY_SEC / 2;
-  let rate = 0;
-  for (let i = 0; i < sorted.length; i += 1) {
+  const dayMid = dateIsoToTs(dateIso) + DAY_SEC / 2;
+  for (let i = sorted.length - 1; i >= 0; i -= 1) {
     const { startTs, endTs, coverageDays } = chargeCoverage(sorted, i);
     if (dayMid >= startTs && dayMid < endTs) {
-      rate += sorted[i].amountEur / coverageDays;
+      void source;
+      return sorted[i].amountEur / coverageDays;
     }
   }
-  // Suppress unused warning
-  void source;
-  return rate;
+  return 0;
 }
 
 export type DailyTokenRow = {

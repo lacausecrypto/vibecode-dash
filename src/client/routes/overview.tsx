@@ -66,6 +66,12 @@ type DailyCombinedRow = {
   codexReasoningOutputTokens: number;
   codexTokens: number;
   codexCostUsd: number;
+  // Per-vendor subscription cost (USD/day) — flat per billing cycle. Returned
+  // by the server but previously unused on Overview; now powers the
+  // per-vendor sub-leverage comparator. Optional because older API clients
+  // or cached responses may not include these fields.
+  claudeSubCostUsd?: number;
+  codexSubCostUsd?: number;
   totalTokens: number;
   totalCostUsd: number;
 };
@@ -98,10 +104,31 @@ type CombinedDay = {
   clones: number;
   viewsUniques: number;
   clonesUniques: number;
+  // Raw totals including cache (kept for cache-ROI-style comparisons).
   claudeTokens: number;
   codexTokens: number;
   claudeCost: number;
   codexCost: number;
+  // Per-vendor daily subscription cost in USD (flat per billing cycle).
+  // Used by the sub-leverage comparator (PAYG ÷ sub per CLI).
+  claudeSubCost: number;
+  codexSubCost: number;
+  // Per-provider cache volume (for Claude vs Codex cache comparator).
+  // Claude = cache_create + cache_read, Codex = cached_input (no create).
+  claudeCacheTotalTokens: number;
+  codexCacheTotalTokens: number;
+  // Fresh tokens = input + output, cache excluded. Apples-to-apples across
+  // providers — cache_read for Claude and cached_input for Codex are removed
+  // upstream so Codex's volume is not dwarfed by Claude's heavy cache reuse.
+  claudeFreshTokens: number;
+  codexFreshTokens: number;
+  // Pure output (what the model actually wrote, visible to the user). Does
+  // NOT include Codex reasoning (reasoning is internal thinking, surfaced
+  // separately in `codexReasoningTokens`).
+  claudeOutputTokens: number;
+  codexOutputTokens: number;
+  // Cross-provider aggregates, cache-excluded so percentages and ratios are
+  // honest. inputTokens previously over-counted cached_input twice.
   activeTokens: number;
   cachedTokens: number;
   inputTokens: number;
@@ -115,6 +142,7 @@ type CombinedDay = {
 type VsModeKey =
   | 'cld-cdx-tokens'
   | 'cld-cdx-cost'
+  | 'cld-cdx-sub-leverage'
   | 'active-cached'
   | 'payg-abo'
   | 'views-clones'
@@ -122,16 +150,21 @@ type VsModeKey =
   | 'commits-tokens'
   | 'input-output'
   | 'cache-read-create'
+  | 'cld-cdx-cache'
   | 'codex-reason-output'
   | 'tokens-views'
   | 'clones-uniques'
-  | 'claude-output-cache'
   | 'commits-cost'
   | 'commits-output'
-  | 'commits-views'
-  | 'claude-output-codex-output'
+  | 'commits-notes'
   | 'cost-tokens'
   | 'cost-output';
+
+type VsModeCtx = {
+  subDailyUsd: number;
+  subClaudeUsd: number;
+  subCodexUsd: number;
+};
 
 type VsModeConfig = {
   segLabel?: string;
@@ -141,10 +174,10 @@ type VsModeConfig = {
   colorA: string;
   colorB: string;
   getA: (day: CombinedDay) => number;
-  getB: (day: CombinedDay, ctx: { subDailyUsd: number }) => number;
+  getB: (day: CombinedDay, ctx: VsModeCtx) => number;
   formatValue: (value: number) => string;
   leverageLabel?: string;
-  leverageValue: (totalA: number, totalB: number) => string;
+  leverageValue: (totalA: number, totalB: number, ctx?: VsModeCtx) => string;
   insight?: string;
   // Si true: les deux séries partagent la même échelle (100% = max des deux).
   // À activer uniquement quand A et B ont la même unité.
@@ -353,8 +386,11 @@ const VS_MODES: Record<VsModeKey, VsModeConfig> = {
   'cld-cdx-tokens': {
     colorA: '#64d2ff',
     colorB: '#ff9500',
-    getA: (day) => day.claudeTokens,
-    getB: (day) => day.codexTokens,
+    // Fresh tokens (input + output, no cache) — apples-to-apples. Previously
+    // used cache-inclusive totals, which made Claude 500× bigger than Codex
+    // on days with heavy cache_read and hid Codex's actual work.
+    getA: (day) => day.claudeFreshTokens,
+    getB: (day) => day.codexFreshTokens,
     formatValue: compactNumberLabel,
     leverageValue: (a, b) => ratioLabel(a, b),
     sharedScale: true,
@@ -458,13 +494,17 @@ const VS_MODES: Record<VsModeKey, VsModeConfig> = {
     leverageValue: (a, b) => ratioLabel(a, b),
     sharedScale: true,
   },
-  'claude-output-cache': {
-    colorA: '#ff9500',
-    colorB: '#30d158',
-    getA: (day) => day.outputTokens,
-    getB: (day) => day.cacheReadTokens,
+  'cld-cdx-cache': {
+    colorA: '#64d2ff',
+    colorB: '#ff9500',
+    // Cache volume per CLI — reveals who leans harder on the prompt cache.
+    // Claude = cache_create + cache_read (both billed categories on Anthropic
+    // side). Codex = cached_input (OpenAI only has the read-side concept,
+    // cache creation is implicit).
+    getA: (day) => day.claudeCacheTotalTokens,
+    getB: (day) => day.codexCacheTotalTokens,
     formatValue: compactNumberLabel,
-    leverageValue: (a, b) => ratioLabel(b, a),
+    leverageValue: (a, b) => ratioLabel(a, b),
     sharedScale: true,
   },
   'commits-cost': {
@@ -484,21 +524,41 @@ const VS_MODES: Record<VsModeKey, VsModeConfig> = {
     formatValue: compactNumberLabel,
     leverageValue: (a, b) => (a > 0 ? compactNumberLabel(b / a) : '—'),
   },
-  'commits-views': {
+  'commits-notes': {
     colorA: '#30d158',
-    colorB: '#0a84ff',
+    colorB: '#bf5af2',
+    // Execution (versioned code) vs reflection (vault notes). Reveals which
+    // days you shipped vs which days you planned / designed. Notes come from
+    // the Obsidian vault activity feed, already populated in CombinedDay.
     getA: (day) => day.github,
-    getB: (day) => day.views,
+    getB: (day) => day.notes,
     formatValue: numberLabel,
     leverageValue: (a, b) => (a > 0 ? ratioLabel(b, a) : '—'),
   },
-  'claude-output-codex-output': {
+  'cld-cdx-sub-leverage': {
     colorA: '#64d2ff',
     colorB: '#ff9500',
-    getA: (day) => Math.max(0, day.claudeTokens - day.cacheReadTokens - day.cacheCreateTokens),
-    getB: (day) => day.codexResponseTokens + day.codexReasoningTokens,
-    formatValue: compactNumberLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
+    // Per-vendor subscription ROI: daily PAYG cost that the sub "covers".
+    // We plot PAYG raw per-day per vendor (directly visible on chart), and
+    // expose the sub-leverage ratio (ΣPAYG / Σsub) via leverageValue so the
+    // user sees which CLI's sub is more profitable. Normalizing the two
+    // vendors against the sharedMax lets you compare magnitudes day-over-day.
+    getA: (day) => day.claudeCost,
+    getB: (day) => day.codexCost,
+    formatValue: usdLabel,
+    // Ratio of totals is computed elsewhere via sums of aRaw/bRaw — but the
+    // real insight here is (PAYG Claude / sub Claude) vs (PAYG Codex / sub
+    // Codex). We fold that into the label: leverageValue receives the two
+    // PAYG totals, then we re-derive sub totals from the same row set via
+    // the ctx hook below.
+    leverageValue: (a, b, ctx) => {
+      const subClaude = ctx?.subClaudeUsd ?? 0;
+      const subCodex = ctx?.subCodexUsd ?? 0;
+      const levA = subClaude > 0 ? a / subClaude : 0;
+      const levB = subCodex > 0 ? b / subCodex : 0;
+      if (levA <= 0 && levB <= 0) return '—';
+      return `${levA.toFixed(1)}× · ${levB.toFixed(1)}×`;
+    },
     sharedScale: true,
   },
   'cost-tokens': {
@@ -531,6 +591,20 @@ function computeSubscriptionDailyUsd(settings: SettingsResponse | null): number 
   return monthlyUsd / 30;
 }
 
+function computeSubscriptionDailyPerVendor(settings: SettingsResponse | null): {
+  claude: number;
+  codex: number;
+} {
+  if (!settings) return { claude: 0, codex: 0 };
+  const usdToEur = Math.max(0.01, Number(settings.subscriptions.usdToEur || 0.93));
+  const claudeMonthlyEur = Number(settings.subscriptions.claude?.monthlyEur || 0);
+  const codexMonthlyEur = Number(settings.subscriptions.codex?.monthlyEur || 0);
+  return {
+    claude: claudeMonthlyEur / usdToEur / 30,
+    codex: codexMonthlyEur / usdToEur / 30,
+  };
+}
+
 type VsCategoryKey = 'llm' | 'cache' | 'cost' | 'trafic' | 'effort';
 
 type VsCategory = {
@@ -541,11 +615,11 @@ type VsCategory = {
 const VS_CATEGORIES: VsCategory[] = [
   {
     key: 'llm',
-    modes: ['cld-cdx-tokens', 'cld-cdx-cost', 'claude-output-codex-output', 'input-output'],
+    modes: ['cld-cdx-tokens', 'cld-cdx-cost', 'cld-cdx-sub-leverage', 'input-output'],
   },
   {
     key: 'cache',
-    modes: ['active-cached', 'cache-read-create', 'claude-output-cache', 'codex-reason-output'],
+    modes: ['active-cached', 'cache-read-create', 'cld-cdx-cache', 'codex-reason-output'],
   },
   {
     key: 'cost',
@@ -557,7 +631,7 @@ const VS_CATEGORIES: VsCategory[] = [
   },
   {
     key: 'effort',
-    modes: ['commits-tokens', 'commits-output', 'commits-cost', 'commits-views'],
+    modes: ['commits-tokens', 'commits-output', 'commits-cost', 'commits-notes'],
   },
 ];
 
@@ -684,10 +758,16 @@ export default function OverviewRoute() {
         const claudeOutput = Number(row.claudeOutputTokens || 0);
         const claudeCacheCreate = Number(row.claudeCacheCreateTokens || 0);
         const claudeCacheRead = Number(row.claudeCacheReadTokens || 0);
-        const codexInput = Number(row.codexInputTokens || 0);
+        // codexInput in the ccusage schema is the TOTAL input (cached +
+        // fresh). Subtract cached to get fresh-only input, so provider
+        // comparisons aren't skewed by cache.
+        const codexInputTotal = Number(row.codexInputTokens || 0);
         const codexCached = Number(row.codexCachedInputTokens || 0);
+        const codexFreshInput = Math.max(0, codexInputTotal - codexCached);
         const codexOutput = Number(row.codexOutputTokens || 0);
         const codexReasoning = Number(row.codexReasoningOutputTokens || 0);
+        const claudeFresh = claudeInput + claudeOutput;
+        const codexFresh = codexFreshInput + codexOutput + codexReasoning;
         return {
           date: String(row.date),
           tokens: Number(row.totalTokens || 0),
@@ -696,9 +776,17 @@ export default function OverviewRoute() {
           codexTokens: Number(row.codexTokens || 0),
           claudeCost: Number(row.claudeCostUsd || 0),
           codexCost: Number(row.codexCostUsd || 0),
-          activeTokens: claudeInput + claudeOutput + codexInput + codexOutput + codexReasoning,
+          claudeFreshTokens: claudeFresh,
+          codexFreshTokens: codexFresh,
+          claudeOutputTokens: claudeOutput,
+          codexOutputTokens: codexOutput,
+          claudeSubCost: Number(row.claudeSubCostUsd || 0),
+          codexSubCost: Number(row.codexSubCostUsd || 0),
+          claudeCacheTotalTokens: claudeCacheCreate + claudeCacheRead,
+          codexCacheTotalTokens: codexCached,
+          activeTokens: claudeFresh + codexFresh,
           cachedTokens: claudeCacheRead + claudeCacheCreate + codexCached,
-          inputTokens: claudeInput + codexInput,
+          inputTokens: claudeInput + codexFreshInput,
           outputTokens: claudeOutput + codexOutput + codexReasoning,
           cacheReadTokens: claudeCacheRead + codexCached,
           cacheCreateTokens: claudeCacheCreate,
@@ -730,6 +818,18 @@ export default function OverviewRoute() {
     const outputTokensByDate = new Map(usageDays.map((day) => [day.date, day.outputTokens]));
     const cacheReadByDate = new Map(usageDays.map((day) => [day.date, day.cacheReadTokens]));
     const cacheCreateByDate = new Map(usageDays.map((day) => [day.date, day.cacheCreateTokens]));
+    const claudeFreshByDate = new Map(usageDays.map((day) => [day.date, day.claudeFreshTokens]));
+    const codexFreshByDate = new Map(usageDays.map((day) => [day.date, day.codexFreshTokens]));
+    const claudeOutputByDate = new Map(usageDays.map((day) => [day.date, day.claudeOutputTokens]));
+    const codexOutputByDate = new Map(usageDays.map((day) => [day.date, day.codexOutputTokens]));
+    const claudeSubCostByDate = new Map(usageDays.map((day) => [day.date, day.claudeSubCost]));
+    const codexSubCostByDate = new Map(usageDays.map((day) => [day.date, day.codexSubCost]));
+    const claudeCacheTotalByDate = new Map(
+      usageDays.map((day) => [day.date, day.claudeCacheTotalTokens]),
+    );
+    const codexCacheTotalByDate = new Map(
+      usageDays.map((day) => [day.date, day.codexCacheTotalTokens]),
+    );
     const codexReasoningByDate = new Map(
       usageDays.map((day) => [day.date, day.codexReasoningTokens]),
     );
@@ -891,6 +991,14 @@ export default function OverviewRoute() {
         codexTokens: codexByDate.get(date) || 0,
         claudeCost: claudeCostByDate.get(date) || 0,
         codexCost: codexCostByDate.get(date) || 0,
+        claudeFreshTokens: claudeFreshByDate.get(date) || 0,
+        codexFreshTokens: codexFreshByDate.get(date) || 0,
+        claudeOutputTokens: claudeOutputByDate.get(date) || 0,
+        codexOutputTokens: codexOutputByDate.get(date) || 0,
+        claudeSubCost: claudeSubCostByDate.get(date) || 0,
+        codexSubCost: codexSubCostByDate.get(date) || 0,
+        claudeCacheTotalTokens: claudeCacheTotalByDate.get(date) || 0,
+        codexCacheTotalTokens: codexCacheTotalByDate.get(date) || 0,
         activeTokens: activeTokensByDate.get(date) || 0,
         cachedTokens: cachedTokensByDate.get(date) || 0,
         inputTokens: inputTokensByDate.get(date) || 0,
@@ -903,6 +1011,7 @@ export default function OverviewRoute() {
     }
 
     const subUsd = computeSubscriptionDailyUsd(settings);
+    const subPerVendor = computeSubscriptionDailyPerVendor(settings);
 
     const recentMax = {
       github: Math.max(1, ...recentCombined.map((day) => day.github)),
@@ -920,6 +1029,8 @@ export default function OverviewRoute() {
       recentMax,
       githubDays,
       subDailyUsd: subUsd,
+      subClaudeUsd: subPerVendor.claude,
+      subCodexUsd: subPerVendor.codex,
     };
   }, [projects, heatmap, daily, obsidianActivity, trafficSeries, settings, t]);
 
@@ -937,7 +1048,11 @@ export default function OverviewRoute() {
       leverageLabel: t(`overview.vsModes.${vsMode}.leverageLabel`),
       insight: t(`overview.vsModes.${vsMode}.insight`),
     };
-    const ctx = { subDailyUsd: model.subDailyUsd };
+    const ctx: VsModeCtx = {
+      subDailyUsd: model.subDailyUsd,
+      subClaudeUsd: model.subClaudeUsd,
+      subCodexUsd: model.subCodexUsd,
+    };
     const rows = model.recentCombined.map((day) => ({
       aRaw: config.getA(day),
       bRaw: config.getB(day, ctx),
@@ -957,8 +1072,8 @@ export default function OverviewRoute() {
       aIndex: (r.aRaw / denomA) * 100,
       bIndex: (r.bRaw / denomB) * 100,
     }));
-    return { config, chart, totalA, totalB };
-  }, [vsMode, model.recentCombined, model.subDailyUsd, t]);
+    return { config, chart, totalA, totalB, ctx };
+  }, [vsMode, model.recentCombined, model.subDailyUsd, model.subClaudeUsd, model.subCodexUsd, t]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -1076,7 +1191,7 @@ export default function OverviewRoute() {
                 />
                 <VsKpi
                   label={vsData.config.leverageLabel ?? ''}
-                  value={vsData.config.leverageValue(vsData.totalA, vsData.totalB)}
+                  value={vsData.config.leverageValue(vsData.totalA, vsData.totalB, vsData.ctx)}
                   color="var(--text)"
                   accent
                 />

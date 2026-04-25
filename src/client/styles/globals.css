@@ -720,6 +720,82 @@ kbd {
   padding: 6px 10px;
   text-align: left;
 }
+.prose-readme thead th {
+  background: var(--surface-2);
+  font-weight: 600;
+  color: var(--text);
+}
+.prose-readme-table-wrap,
+.prose-readme .prose-table-wrap {
+  overflow-x: auto;
+  margin: 10px 0;
+  border-radius: var(--radius-sm);
+}
+.prose-readme .prose-table-wrap table {
+  margin: 0;
+}
+.prose-readme img,
+.prose-readme video {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  margin: 10px 0;
+  display: block;
+  background: var(--surface-1);
+}
+/* Inline images inside paragraphs (typical shield.io badges) must stay on
+   the same baseline as the surrounding text — `display: block` with big
+   vertical margin would stack them one per row. We also drop the border
+   and background because badges already ship with their own visual chrome. */
+.prose-readme p img,
+.prose-readme p video,
+.prose-readme a img,
+.prose-readme a video {
+  display: inline-block;
+  vertical-align: middle;
+  margin: 2px 4px 2px 0;
+  border: 0;
+  background: transparent;
+  border-radius: 3px;
+}
+.prose-readme hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+.prose-readme ul li input[type="checkbox"],
+.prose-readme ol li input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: middle;
+  accent-color: var(--accent);
+}
+.prose-readme h1 a.anchor,
+.prose-readme h2 a.anchor,
+.prose-readme h3 a.anchor {
+  opacity: 0;
+  margin-right: 6px;
+  transition: opacity 0.15s;
+}
+.prose-readme h1:hover a.anchor,
+.prose-readme h2:hover a.anchor,
+.prose-readme h3:hover a.anchor {
+  opacity: 0.5;
+}
+.prose-readme h1,
+.prose-readme h2,
+.prose-readme h3 {
+  scroll-margin-top: 24px;
+}
+.prose-readme kbd {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--text-mute);
+}
 
 /* ================= Scrollbar ================= */
 
@@ -768,6 +844,25 @@ kbd {
   }
   50% {
     opacity: 1;
+  }
+}
+
+/* Mascot sprite cross-fade. The component swaps the rendered <img> by
+   changing its `key`, which remounts the element — replaying this
+   keyframe for each new sprite. Subtle scale-in + fade so a state change
+   reads as a transition, not a hard cut. Short enough (180 ms) that rapid
+   state changes still feel responsive. */
+.mascot-img {
+  animation: mascot-fade-in 180ms ease-out;
+}
+@keyframes mascot-fade-in {
+  from {
+    opacity: 0.55;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
   }
 }
 

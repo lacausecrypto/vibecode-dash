@@ -69,11 +69,39 @@ async function request<T>(path: string, init: ApiInit = {}): Promise<T> {
   // Caller-supplied headers win, so tests can still override.
   const merged = { ...headers, ...((init.headers as Record<string, string> | undefined) || {}) };
 
-  const res = await fetch(path, { ...init, headers: merged, credentials: 'same-origin' });
+  // Activity bus: emit start/end/error so the Mascot can react. Dynamic
+  // import keeps the api layer free of UI dependencies — bus is loaded on
+  // first use, never on the critical path of token bootstrap.
+  const method = (init.method || 'GET').toUpperCase();
+  const startedAt = Date.now();
+  const { emitActivity } = await import('./activityBus');
+  emitActivity({ kind: 'fetch:start', path, method, at: startedAt });
+
+  let res: Response;
+  try {
+    res = await fetch(path, { ...init, headers: merged, credentials: 'same-origin' });
+  } catch (err) {
+    emitActivity({ kind: 'fetch:error', path, method, status: 0, at: Date.now() });
+    throw err;
+  }
+
   if (!res.ok) {
+    if (res.status === 429) {
+      emitActivity({ kind: 'fetch:rateLimit', path, at: Date.now() });
+    } else {
+      emitActivity({ kind: 'fetch:error', path, method, status: res.status, at: Date.now() });
+    }
     const detail = await res.text().catch(() => '');
     throw new ApiError(res.status, res.statusText, detail || undefined);
   }
+  emitActivity({
+    kind: 'fetch:end',
+    path,
+    method,
+    status: res.status,
+    ms: Date.now() - startedAt,
+    at: Date.now(),
+  });
   return (await res.json()) as T;
 }
 
@@ -93,6 +121,14 @@ export async function apiPut<T>(path: string, body: unknown, init?: ApiInit): Pr
   return request<T>(path, {
     ...init,
     method: 'PUT',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function apiPatch<T>(path: string, body: unknown, init?: ApiInit): Promise<T> {
+  return request<T>(path, {
+    ...init,
+    method: 'PATCH',
     body: JSON.stringify(body),
   });
 }

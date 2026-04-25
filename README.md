@@ -14,7 +14,7 @@ A dashboard that turns your LLM CLI sessions, your Git repos, and your Obsidian 
 bunx vibecode-dash     # one-shot, no clone, no account
 ```
 
-> **Status:** First version. ~60 API endpoints, end-to-end functional.
+> **Status:** v0.2.0 — adds the **Presence Copilot** (drafts replies and posts for X + Reddit, you approve every send), a **mascot + activity bus** that surfaces what the dashboard is doing in real time, and OAuth-aware quota tracking. ~100 API endpoints, end-to-end functional.
 
 ![vibecode-dash demo](docs/media/demo.gif)
 
@@ -41,7 +41,7 @@ No account. No telemetry. No cloud sync. A SQLite file and a port on loopback.
 
 ## What's inside, concretely
 
-Five feature areas, all shipped today. Every claim below maps to real routes under `src/server/routes/`.
+Six feature areas, all shipped today. Every claim below maps to real routes under `src/server/routes/`.
 
 ### 1 · LLM usage telemetry
 
@@ -102,6 +102,21 @@ This is the one feature where the agent looks outward instead of inward. It's op
 
 Endpoints: `/api/radar/summary`, `/api/projects/:id/competitors`, `/:id/competitors/scan`, `/:id/insights/generate`, `/api/insights`, `/:id/promote`.
 
+### 6 · Presence Copilot — drafted social, approved by you
+
+A human-in-the-loop pipeline for posting on **X** and **Reddit** from your own account. The dashboard scans curated sources (subreddits, lists, accounts, topic searches), scores opportunities, drafts candidate replies via your local `claude` or `codex` CLI, and queues them for review. **Nothing leaves your machine without an explicit click.**
+
+- **Sources** are first-class: each gets a validation status (`valid` / `not_found` / `banned` / `private`) checked against the platform endpoint, and a health band (`pristine`, `workhorse`, `noisy`, `stale`, `dead`, …) computed from 30/60-day activity. Dead sources are surfaced for one-click deactivation, with a 7-day cooldown if you dismiss a suggestion.
+- **Drafts** flow through a finite state machine: `proposed → kept → drafting → ready → posted | dismissed | expired`. A partial unique index ensures the scanner never produces a duplicate draft for the same thread. Drafts are soft-deleted; the cost ledger and engagement timeline survive.
+- **Cost ledger**: every PAYG call (image gen via OpenRouter, scoring/drafting if you opt out of subscription quota) writes a row. A `presence.dailyBudgetUsd` cap (default $0.50) hard-stops the queue when reached.
+- **Engagement snapshots** post-publication: 1 h, 24 h, 7 d windows for likes / reposts / replies / clicks where the platform exposes them.
+- **Boot-time seed** of 16 default sources (`r/claude`, `r/codex`, `r/MachineLearning`, X lists for `@anthropic` / `@openai`, …) so an empty install isn't a blank page.
+- **All credentials in OS keyring**: X bearer + handle, Reddit script-OAuth (client_id / secret / username / password — see Security), OpenRouter API key. Refresh delegated to upstream where possible.
+
+The drafter system prompt runs CLIs with `toolPolicy: 'none'` so the model can reason over thread content without shelling out. Every draft is preceded by a clear *digest* of the source thread; you can edit prompt, body, image, or scrap it entirely. **You always click "post" yourself** — there is no auto-post mode and no roadmap to add one.
+
+Endpoints (~40 under `/api/presence/`): `/feed`, `/scan-now`, `/sources` (CRUD + `/validate-all`, `/refresh-health`, `/prune-suggestions`), `/drafts/:id` (PATCH for state transitions, `/image` for opt-in image gen), `/cost-ledger`, `/engagement/:draftId`, `/connections` (OAuth status per platform).
+
 ---
 
 ## The memory loop, what makes it different
@@ -132,10 +147,11 @@ Implementation: `src/server/lib/memoryPass.ts` + `memoryVaultSync.ts`.
 ## How this differs from existing OSS tools
 
 - **Not another LLM observability platform.** No proxy, no SDK, no Docker compose. Just reads the JSONL files Claude Code and Codex already write. [Langfuse](https://github.com/langfuse/langfuse) / [Helicone](https://github.com/Helicone/helicone) target platform teams with app-level telemetry; vibecode-dash targets the solo dev downstream of the CLI.
-- **Not a ccusage replacement.** [`ccusage`](https://github.com/ryoppippi/ccusage) owns the "Claude/Codex JSONL parser" corner and it should. vibecode-dash treats usage as one of five surfaces. Same numbers, surrounded by the project and vault context that makes them actionable. It reuses `@ccusage/codex` for the Codex half.
+- **Not a ccusage replacement.** [`ccusage`](https://github.com/ryoppippi/ccusage) owns the "Claude/Codex JSONL parser" corner and it should. vibecode-dash treats usage as one of six surfaces. Same numbers, surrounded by the project and vault context that makes them actionable. It reuses `@ccusage/codex` for the Codex half.
 - **Not an Obsidian replacement.** No plugin, no daemon, no sync. A read-only scanner + FTS5 index + bounded hub writes. [SilverBullet](https://github.com/silverbulletmd/silverbullet) and [Logseq](https://github.com/logseq/logseq) replace Obsidian; vibecode-dash leaves it untouched.
 - **Local-first GitHub mirror.** [`gh-dash`](https://github.com/dlvhdr/gh-dash) mirrors GitHub to your terminal, [`ghstats`](https://github.com/vladkens/ghstats) / [`repohistory`](https://github.com/repohistory/repohistory) snapshot traffic. vibecode-dash does the traffic-snapshot trick but anchors on *local* repo state. Your working tree is the source of truth; GitHub is enriched metadata.
-- **Agent panel wraps CLIs on purpose.** [`claudecodeui`](https://github.com/siteboon/claudecodeui) and [`codedash`](https://github.com/vakovalskii/codedash) are the current OSS agent panels, whole apps built around the agent. Here the agent is one of five tabs, deliberately CLI-subprocess only, and it *sees* your repos and vault without leaving the process. Plus the memory write-back loop, which neither has.
+- **Agent panel wraps CLIs on purpose.** [`claudecodeui`](https://github.com/siteboon/claudecodeui) and [`codedash`](https://github.com/vakovalskii/codedash) are the current OSS agent panels, whole apps built around the agent. Here the agent is one of six tabs, deliberately CLI-subprocess only, and it *sees* your repos and vault without leaving the process. Plus the memory write-back loop, which neither has.
+- **Not a social scheduler.** [Buffer](https://buffer.com) / [Typefully](https://typefully.com) / [Hypefury](https://hypefury.com) own the schedule-and-publish corner. Presence Copilot does the opposite: it *drafts* from sources you actually engage with, you read every word, you click post yourself in the platform UI. No SaaS, no scheduling queue, no "AI auto-engagement". The output is a draft for your eyes, not a tweet for the world.
 - **Solo-dev scoped.** `127.0.0.1` only. Secrets in OS keyring (macOS `security`, Linux libsecret, Windows DPAPI). No multi-tenant, no auth server, no telemetry. And no roadmap to add any.
 
 ---
@@ -223,30 +239,34 @@ Paths resolved through `node:os.homedir()` + `node:path.join`, no hardcoded sepa
 ┌──────────────────────────────────────────────────┐
 │  React + Vite (127.0.0.1:4317)                   │
 │  ├─ Overview · Usage · Projects · GitHub         │
-│  ├─ Vault · Agent · Radar · Settings             │
+│  ├─ Vault · Agent · Radar · Presence · Settings  │
+│  ├─ Mascot ◀─ activity bus ─ fetch lifecycle     │
 │  └─ X-Dashboard-Token on every /api/* request    │
 └──────────────────────┬───────────────────────────┘
                        │ proxy /api → :4318 (dev)
 ┌──────────────────────▼───────────────────────────┐
 │  Hono (127.0.0.1:4318, single port in prod)      │
 │  ├─ auth middleware: Host + Origin + Token       │
-│  ├─ ~60 routes under /api/{auth,health,          │
+│  ├─ ~100 routes under /api/{auth,health,         │
 │  │   projects,github,obsidian,usage,             │
-│  │   agent,radar,settings}                       │
-│  ├─ scheduler (project rescan, github sync,      │
-│  │   usage sync) with retry/backoff              │
+│  │   agent,radar,presence,settings}              │
+│  ├─ scheduler: project rescan, github sync,      │
+│  │   usage sync, presence-{scan,engagement,      │
+│  │   health,persona,quota,expire-stale}          │
 │  ├─ obsidian fs watcher (debounced)              │
+│  ├─ presence: X + Reddit + OpenRouter wrappers   │
+│  │   (credentials in OS keyring)                 │
 │  └─ agent memory write-back pass                 │
 └──────────────────────┬───────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────┐
-│  SQLite (data/db.sqlite, WAL mode, 10 migrations)│
+│  SQLite (data/db.sqlite, WAL mode, 16 migrations)│
 │  + FTS5 for vault notes                          │
 │  Secrets in OS keyring (not in this repo)        │
 └──────────────────────────────────────────────────┘
 ```
 
-**Stack:** Bun 1.1+ · Hono 4 · React 19 · Vite 7 · Tailwind 4 · SQLite (`bun:sqlite`) · Zod 4. No LLM SDKs. Only CLIs, on purpose.
+**Stack:** Bun 1.1+ · Hono 4 · React 19 · Vite 7 · Tailwind 4 · SQLite (`bun:sqlite`) · Zod 4. No LLM SDKs. Only CLIs, on purpose. OAuth wrappers for X, Reddit, OpenRouter, Anthropic, and Codex sit on top of `fetch` directly, with all credentials in the OS keyring.
 
 See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for resource benchmarks (~340 ms cold start, ~60 MB RSS idle, 1.5 MB npm tarball).
 
@@ -257,10 +277,12 @@ See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for resource benchmarks (~340 ms 
 - [x] **Phase 1**: foundations, project scanner, GitHub sync, usage via `ccusage`, base UI
 - [x] **Phase 2**: Obsidian scanner + FTS5, agent CLI sessions, quick-commands, direct JSONL analytics, Codex usage integration
 - [x] **Phase 3**: Competitor Radar + Divergence Engine, memory write-back pass, vault auto-hubs, vault memory sync
-- [x] **v1**: published to npm, `bunx vibecode-dash` install path, OS app-data dir layout, cross-platform keyring, CLI wrapper
-- [ ] **v1.1**: Tauri packaging (signed binaries macOS/Linux/Windows, auto-update, tray icon)
-- [ ] **v1.2**: embeddings layer (opt-in, local model), more LLM CLI adapters (Ollama, Cursor, Gemini), plugin API
-- [ ] **v2**: smart auto-post mode for Reddit / LinkedIn. Drafts devlog posts from your vault + recent project activity (shipped features, insights from the Radar, milestones), with per-platform tone and audience matching. You approve each draft before it leaves the machine.
+- [x] **v0.1**: published to npm, `bunx vibecode-dash` install path, OS app-data dir layout, cross-platform keyring, CLI wrapper
+- [x] **v0.2** *(this release)*: Presence Copilot for X + Reddit (drafts, source health, cost ledger, engagement snapshots), activity bus + mascot, OAuth-aware quota tracking, sync log moved to `Settings → Logs`, billing accrual fix
+- [ ] **v0.3**: PII scrubber for image-generation prompts, per-day rate cap on PAYG image gen, Reddit app-password rotation helper
+- [ ] **v1.0**: Tauri packaging (signed binaries macOS/Linux/Windows, auto-update, tray icon), CI matrix on Linux + Windows
+- [ ] **v1.1**: embeddings layer (opt-in, local model), more LLM CLI adapters (Ollama, Cursor, Gemini), plugin API
+- [ ] **v2**: vault-aware devlog drafter — pulls shipped features, Radar insights and recent commits to compose long-form posts. Same human-in-the-loop rule as Presence: you approve every send.
 
 ---
 
@@ -270,9 +292,11 @@ The server binds `127.0.0.1` only. Three-layer defense on `/api/*`:
 
 1. **Host header** must resolve to loopback (anti-DNS-rebinding).
 2. **Origin header**, when present, must be a loopback origin (CSRF block).
-3. **`X-Dashboard-Token`**: 64-hex-char secret generated at first boot, stored `0600` in the OS app-data dir, compared with `timingSafeEqual`.
+3. **`X-Dashboard-Token`**: 64-hex-char secret generated at first boot, stored `0600` in the OS app-data dir, compared with `timingSafeEqual`. Accepted via `?token=…` query param **only on `GET`** for resources that cannot inject custom headers (`<img src>`, `<video src>`); `POST`/`PUT`/`PATCH`/`DELETE` always require the header to preserve CSRF protection.
 
-Secrets (GitHub PAT, future provider credentials) live in the OS keyring. Never in the repo. Never in `.env`.
+Secrets — GitHub PAT, X bearer + handle, Reddit script credentials, OpenRouter API key, Anthropic / Codex OAuth tokens — live in the OS keyring (macOS `security`, Linux libsecret, Windows DPAPI). Never in the repo. Never in `.env`.
+
+The Markdown renderer applies `rel="noopener noreferrer"` to all external `<a>` so the auth token cannot leak via the Referer header on link clicks. Presence drafter spawns the local CLI with `toolPolicy: 'none'` to prevent shell-out while reasoning over scraped social content.
 
 Full threat model in [SECURITY.md](SECURITY.md).
 

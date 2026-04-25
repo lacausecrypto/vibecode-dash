@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Heatmap } from '../components/Heatmap';
+import { HeatmapLine } from '../components/HeatmapLine';
 import {
   Button,
   Card,
@@ -30,6 +31,11 @@ type Repo = {
   primary_lang: string | null;
   pushed_at: number | null;
   url: string | null;
+  // Surfaced by server from github_repos.topics_json (parsed at response
+  // time). Empty array if none; optional for backward-compat with cached
+  // responses from older servers.
+  topics?: string[];
+  is_fork?: boolean;
 };
 
 type RepoTraffic = {
@@ -79,6 +85,24 @@ type TrafficTimeseriesResponse = {
   reposWithTraffic: number;
 };
 
+type RepoMetricsRow = {
+  repo: string;
+  // 4 parallel arrays, each of length `days`, aligned on the same date list.
+  // Missing days are zero-filled server-side so bar widths stay consistent
+  // across repos.
+  views: number[];
+  clones: number[];
+  commits: number[];
+  npm: number[];
+};
+
+type RepoMetricsResponse = {
+  days: number;
+  cutoff: string;
+  dates: string[];
+  repos: RepoMetricsRow[];
+};
+
 type RepoSort = 'pushed' | 'stars' | 'forks' | 'name';
 type SparkMetric = 'views' | 'clones';
 type SparkSort = 'window' | 'cumulative';
@@ -116,20 +140,6 @@ type SyncResponse = {
   hasChange?: boolean;
   status?: GithubStatus;
   error?: string;
-};
-
-type SyncLogKind = 'repos' | 'traffic' | 'heatmap' | 'npm' | 'github-all';
-type SyncLogTrigger = 'manual' | 'auto' | 'background';
-type SyncLogStatus = 'ok' | 'no-change' | 'partial' | 'error';
-
-type SyncLogEntry = {
-  id: number;
-  at: number;
-  kind: SyncLogKind;
-  trigger: SyncLogTrigger;
-  status: SyncLogStatus;
-  durationMs: number | null;
-  summary: Record<string, unknown> | null;
 };
 
 type SyncBannerState =
@@ -259,6 +269,20 @@ function sparklinePath(values: number[], width: number, height: number): string 
   return `M ${points.join(' L ')}`;
 }
 
+// Traffic freshness traffic-light for a repo. lastDate is the newest traffic
+// snapshot GitHub has for that repo; a missing or old date means traction
+// has gone dark. Tones mirror the Dot component's palette.
+function trafficFreshnessTone(lastDate: string | null | undefined): 'success' | 'warn' | 'danger' {
+  if (!lastDate) return 'danger';
+  const last = new Date(`${lastDate}T00:00:00Z`).getTime();
+  const now = Date.now();
+  if (Number.isNaN(last)) return 'danger';
+  const ageDays = Math.max(0, (now - last) / 86_400_000);
+  if (ageDays < 3) return 'success';
+  if (ageDays < 7) return 'warn';
+  return 'danger';
+}
+
 function numberLabel(value: number): string {
   return Intl.NumberFormat(numberLocale(currentLocale())).format(Math.round(value));
 }
@@ -272,6 +296,11 @@ export default function GithubRoute() {
   const [repos, setRepos] = useState<Repo[]>([]);
   const [traffic, setTraffic] = useState<TrafficResponse | null>(null);
   const [trafficSeries, setTrafficSeries] = useState<TrafficTimeseriesResponse | null>(null);
+  const [repoMetrics, setRepoMetrics] = useState<RepoMetricsResponse | null>(null);
+  // Kept as a string key so it slots into Segmented<T extends string>.
+  // Coerced to number at the fetch boundary and when the children need it.
+  const [repoMetricsDays, setRepoMetricsDays] = useState<'14' | '30' | '90' | '365'>('14');
+  const repoMetricsDaysNum = Number(repoMetricsDays);
   const [status, setStatus] = useState<GithubStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -287,66 +316,32 @@ export default function GithubRoute() {
   const [heatmapMetric, setHeatmapMetric] = useState<'contrib' | 'views' | 'clones' | 'npm'>(
     'contrib',
   );
+  const [heatmapView, setHeatmapView] = useState<'grid' | 'line'>('grid');
   const [npmDaily, setNpmDaily] = useState<Array<{ date: string; count: number }>>([]);
-  const [deltaPeriod, setDeltaPeriod] = useState<'day' | 'week' | 'month'>('week');
-  const [syncLog, setSyncLog] = useState<SyncLogEntry[]>([]);
-  const [syncLogFilter, setSyncLogFilter] = useState<'all' | 'github' | 'npm' | 'heatmap'>('all');
-  const [isRefreshingNpm, setIsRefreshingNpm] = useState(false);
+  const [deltaPeriod, setDeltaPeriod] = useState<'day' | 'week' | 'month' | 'all'>('week');
 
   async function load() {
     try {
       setError(null);
-      const [
-        heatmapData,
-        reposData,
-        trafficData,
-        trafficSeriesData,
-        statusData,
-        npmDailyData,
-        syncLogData,
-      ] = await Promise.all([
-        apiGet<HeatmapResponse>('/api/github/heatmap'),
-        apiGet<Repo[]>('/api/github/repos'),
-        apiGet<TrafficResponse>('/api/github/traffic?days=14'),
-        apiGet<TrafficTimeseriesResponse>('/api/github/traffic/timeseries?days=120'),
-        apiGet<GithubStatus>('/api/github/status'),
-        apiGet<{ rows: Array<{ date: string; downloads: number }> }>('/api/github/npm/daily').catch(
-          () => ({ rows: [] }),
-        ),
-        apiGet<{ rows: SyncLogEntry[] }>('/api/github/sync-log?limit=50').catch(() => ({
-          rows: [] as SyncLogEntry[],
-        })),
-      ]);
+      const [heatmapData, reposData, trafficData, trafficSeriesData, statusData, npmDailyData] =
+        await Promise.all([
+          apiGet<HeatmapResponse>('/api/github/heatmap'),
+          apiGet<Repo[]>('/api/github/repos'),
+          apiGet<TrafficResponse>('/api/github/traffic?days=14'),
+          apiGet<TrafficTimeseriesResponse>('/api/github/traffic/timeseries?days=120'),
+          apiGet<GithubStatus>('/api/github/status'),
+          apiGet<{ rows: Array<{ date: string; downloads: number }> }>(
+            '/api/github/npm/daily',
+          ).catch(() => ({ rows: [] })),
+        ]);
       setHeatmap(heatmapData);
       setRepos(reposData);
       setTraffic(trafficData);
       setTrafficSeries(trafficSeriesData);
       setStatus(statusData);
       setNpmDaily(npmDailyData.rows.map((r) => ({ date: r.date, count: r.downloads })));
-      setSyncLog(syncLogData.rows || []);
     } catch (e) {
       setError(String(e));
-    }
-  }
-
-  async function refreshSyncLog() {
-    try {
-      const data = await apiGet<{ rows: SyncLogEntry[] }>('/api/github/sync-log?limit=50');
-      setSyncLog(data.rows || []);
-    } catch {
-      /* ignore */
-    }
-  }
-
-  async function refreshNpmNow() {
-    setIsRefreshingNpm(true);
-    try {
-      await apiPost('/api/github/npm/refresh');
-      await load();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setIsRefreshingNpm(false);
     }
   }
 
@@ -358,6 +353,23 @@ export default function GithubRoute() {
     const id = setInterval(() => setNowTick((n) => n + 1), 30_000);
     return () => clearInterval(id);
   }, []);
+
+  // Repo-metrics fetch is decoupled from the main load() because the user
+  // toggles the window (14/30/90/365) independently — no need to re-fetch
+  // repos/traffic/heatmap every time the mini-chart range changes.
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<RepoMetricsResponse>(`/api/github/repo-metrics?days=${repoMetricsDays}`)
+      .then((data) => {
+        if (!cancelled) setRepoMetrics(data);
+      })
+      .catch(() => {
+        if (!cancelled) setRepoMetrics(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repoMetricsDays]);
 
   useEffect(() => {
     if (syncBanner.kind === 'idle' || syncBanner.kind === 'pending') {
@@ -392,7 +404,6 @@ export default function GithubRoute() {
         setStatus(result.status);
       }
       await load();
-      await refreshSyncLog();
     } catch (e) {
       setSyncBanner({ kind: 'error', at: Date.now(), message: String(e) });
     } finally {
@@ -461,6 +472,44 @@ export default function GithubRoute() {
     return map;
   }, [traffic]);
 
+  // Per-repo 14-day sparkline arrays, anchored on today (UTC). Missing days
+  // become zeros so all repos share the same x-scale and shapes are visually
+  // comparable. Built from the already-fetched 120-day timeseries, so no
+  // extra request.
+  const repoMetricsByName = useMemo(() => {
+    const map = new Map<string, RepoMetricsRow>();
+    if (!repoMetrics) return map;
+    for (const row of repoMetrics.repos) map.set(row.repo, row);
+    return map;
+  }, [repoMetrics]);
+
+  const trafficSparkByRepo = useMemo(() => {
+    const out = new Map<string, { views: number[]; clones: number[] }>();
+    if (!trafficSeries) return out;
+    const todayIso = toIsoDate(new Date());
+    const dateWindow = buildDateWindow(todayIso, 14);
+    const perRepoDate = new Map<string, Map<string, { v: number; c: number }>>();
+    for (const row of trafficSeries.rows) {
+      let m = perRepoDate.get(row.repo);
+      if (!m) {
+        m = new Map();
+        perRepoDate.set(row.repo, m);
+      }
+      const prev = m.get(row.date);
+      m.set(row.date, {
+        v: (prev?.v ?? 0) + (row.viewsCount ?? 0),
+        c: (prev?.c ?? 0) + (row.clonesCount ?? 0),
+      });
+    }
+    for (const [repo, dateMap] of perRepoDate) {
+      out.set(repo, {
+        views: dateWindow.map((d) => dateMap.get(d)?.v ?? 0),
+        clones: dateWindow.map((d) => dateMap.get(d)?.c ?? 0),
+      });
+    }
+    return out;
+  }, [trafficSeries]);
+
   const repoByName = useMemo(() => {
     const map = new Map<string, Repo>();
     for (const repo of repos) {
@@ -470,7 +519,20 @@ export default function GithubRoute() {
   }, [repos]);
 
   // Delta % current window vs previous window of same length.
-  const deltaWindowDays = deltaPeriod === 'day' ? 1 : deltaPeriod === 'week' ? 7 : 30;
+  // 'all' collapses the window to "since the earliest data point" — 10 years
+  // is more than enough for any portfolio the dashboard handles today.
+  // Cutoffs computed with this value effectively include everything.
+  const deltaWindowDays =
+    deltaPeriod === 'day'
+      ? 1
+      : deltaPeriod === 'week'
+        ? 7
+        : deltaPeriod === 'month'
+          ? 30
+          : 10 * 365;
+  const isAllTime = deltaPeriod === 'all';
+  // Suffix shown in Stat labels: "· 30 j" becomes "· all" in all-time mode.
+  const deltaLabelSuffix = isAllTime ? t('common.allTime') : `${deltaWindowDays}j`;
 
   // Top starred repo — provides context for the Stars KPI.
   const topStarredRepo = useMemo(() => {
@@ -768,12 +830,13 @@ export default function GithubRoute() {
           <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
             {t('github.deltaVsPrev')}
           </div>
-          <Segmented<'day' | 'week' | 'month'>
+          <Segmented<'day' | 'week' | 'month' | 'all'>
             value={deltaPeriod}
             options={[
               { value: 'day', label: t('common.day') },
               { value: 'week', label: t('common.week') },
               { value: 'month', label: t('common.month') },
+              { value: 'all', label: t('common.allTime') },
             ]}
             onChange={setDeltaPeriod}
           />
@@ -781,7 +844,7 @@ export default function GithubRoute() {
 
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-4">
           <Stat
-            label={`${t('github.stats.contribs')} · ${deltaWindowDays}j`}
+            label={`${t('github.stats.contribs')} · ${deltaLabelSuffix}`}
             value={numberLabel(dailyDeltas.contrib.current)}
             hint={<DeltaHint delta={dailyDeltas.contrib} period={deltaPeriod} />}
           />
@@ -814,7 +877,7 @@ export default function GithubRoute() {
             }
           />
           <Stat
-            label={`Fraîcheur · ${deltaWindowDays}j`}
+            label={`Fraîcheur · ${deltaLabelSuffix}`}
             value={
               pushFreshness.medianSec !== null
                 ? relativeTime(Math.floor(Date.now() / 1000) - pushFreshness.medianSec, t)
@@ -828,7 +891,7 @@ export default function GithubRoute() {
                   </span>
                 ) : (
                   <span className="text-[var(--text-faint)]">
-                    aucun push sur {deltaWindowDays}j
+                    aucun push sur {deltaLabelSuffix}
                   </span>
                 )}
                 {pushFreshness.freshest && pushFreshness.freshestAgeSec !== null ? (
@@ -851,9 +914,13 @@ export default function GithubRoute() {
               </span>
             }
           />
-          <NpmDownloadsStat deltaWindowDays={deltaWindowDays} />
+          <NpmDownloadsStat
+            deltaWindowDays={deltaWindowDays}
+            isAllTime={isAllTime}
+            labelSuffix={deltaLabelSuffix}
+          />
           <Stat
-            label={`Views · ${deltaWindowDays}j`}
+            label={`Views · ${deltaLabelSuffix}`}
             value={numberLabel(dailyDeltas.views.current)}
             hint={
               <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -869,7 +936,7 @@ export default function GithubRoute() {
             }
           />
           <Stat
-            label={`Clones · ${deltaWindowDays}j`}
+            label={`Clones · ${deltaLabelSuffix}`}
             value={numberLabel(dailyDeltas.clones.current)}
             hint={
               <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -886,7 +953,7 @@ export default function GithubRoute() {
             tone="success"
           />
           <Stat
-            label={`Top repo · ${deltaWindowDays}j`}
+            label={`Top repo · ${deltaLabelSuffix}`}
             value={
               topTrafficRepo ? (
                 <span
@@ -956,7 +1023,7 @@ export default function GithubRoute() {
           }
         >
           <Card>
-            <div className="mb-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <Segmented<'contrib' | 'views' | 'clones' | 'npm'>
                 value={heatmapMetric}
                 options={[
@@ -967,43 +1034,54 @@ export default function GithubRoute() {
                 ]}
                 onChange={setHeatmapMetric}
               />
+              <Segmented<'grid' | 'line'>
+                value={heatmapView}
+                options={[
+                  { value: 'grid', label: t('github.heatmap.viewGrid') },
+                  { value: 'line', label: t('github.heatmap.viewLine') },
+                ]}
+                onChange={setHeatmapView}
+              />
             </div>
-            {heatmapMetric === 'contrib' ? (
-              <Heatmap
-                days={heatmap?.days || []}
-                palette="github"
-                totalLabel={t('github.heatmap.totalContribs')}
-              />
-            ) : heatmapMetric === 'views' ? (
-              <Heatmap
-                days={trafficHeatmapDays.views}
-                palette="cyan"
-                totalLabel={t('github.heatmap.totalViews')}
-              />
-            ) : heatmapMetric === 'clones' ? (
-              <Heatmap
-                days={trafficHeatmapDays.clones}
-                palette="amber"
-                totalLabel={t('github.heatmap.totalClones')}
-              />
-            ) : (
-              <Heatmap days={trafficHeatmapDays.npm} palette="magenta" totalLabel="downloads" />
-            )}
+            {(() => {
+              // Single source of (days, palette, label) — both views share the
+              // exact same input so switching grid↔line never diverges.
+              const config =
+                heatmapMetric === 'contrib'
+                  ? {
+                      days: heatmap?.days || [],
+                      palette: 'github' as const,
+                      label: t('github.heatmap.totalContribs'),
+                    }
+                  : heatmapMetric === 'views'
+                    ? {
+                        days: trafficHeatmapDays.views,
+                        palette: 'cyan' as const,
+                        label: t('github.heatmap.totalViews'),
+                      }
+                    : heatmapMetric === 'clones'
+                      ? {
+                          days: trafficHeatmapDays.clones,
+                          palette: 'amber' as const,
+                          label: t('github.heatmap.totalClones'),
+                        }
+                      : {
+                          days: trafficHeatmapDays.npm,
+                          palette: 'magenta' as const,
+                          label: 'downloads',
+                        };
+              return heatmapView === 'grid' ? (
+                <Heatmap days={config.days} palette={config.palette} totalLabel={config.label} />
+              ) : (
+                <HeatmapLine
+                  days={config.days}
+                  palette={config.palette}
+                  totalLabel={config.label}
+                />
+              );
+            })()}
           </Card>
         </Section>
-
-        <SyncLogPanel
-          entries={syncLog}
-          status={status}
-          filter={syncLogFilter}
-          onFilterChange={setSyncLogFilter}
-          onRefresh={() => void refreshSyncLog()}
-          onRefreshNpm={() => void refreshNpmNow()}
-          onSyncGithub={() => void syncNow()}
-          isSyncing={syncing}
-          isRefreshingNpm={isRefreshingNpm}
-          t={t}
-        />
       </div>
 
       <Section
@@ -1110,56 +1188,125 @@ export default function GithubRoute() {
               ]}
               onChange={setRepoSort}
             />
+            {/* Unified window selector for the 4 per-repo mini bar charts
+                (NPM / views / clones / commits). Re-fetches a single endpoint
+                that returns all 4 zero-filled vectors per repo. */}
+            <Segmented<'14' | '30' | '90' | '365'>
+              value={repoMetricsDays}
+              options={[
+                { value: '14', label: t('common.daysAgo', { n: 14 }) },
+                { value: '30', label: t('common.daysAgo', { n: 30 }) },
+                { value: '90', label: t('common.daysAgo', { n: 90 }) },
+                { value: '365', label: t('common.daysAgo', { n: 365 }) },
+              ]}
+              onChange={setRepoMetricsDays}
+            />
           </Toolbar>
 
-          <div className="mt-3 flex flex-col gap-2">
+          <div className="mt-3 grid grid-cols-1 gap-2 lg:grid-cols-2">
             {filteredRepos.slice(0, 50).map((repo) => {
               const repoTraffic = trafficByRepo.get(repo.name);
+              const freshness = trafficFreshnessTone(repoTraffic?.lastDate);
+              const metrics = repoMetricsByName.get(repo.name);
+              const emptyVec: number[] = new Array(repoMetricsDaysNum).fill(0);
               return (
                 <a
                   key={repo.name}
                   href={repo.url || '#'}
                   target="_blank"
                   rel="noreferrer"
-                  className="flex flex-wrap items-start justify-between gap-3 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2.5 hover:border-[var(--border-strong)] hover:bg-[var(--surface-2)]"
+                  className="flex flex-col gap-2 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2.5 hover:border-[var(--border-strong)] hover:bg-[var(--surface-2)]"
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
+                  {/* Header row : freshness dot + name + lang + fork chip +
+                      stars/forks + relative push date. Push date has full
+                      ISO in title attribute for exact-date hover. */}
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Dot tone={freshness} />
                       <span className="truncate text-[14px] font-medium text-[var(--text)]">
                         {repo.name}
                       </span>
                       {repo.primary_lang ? <Chip>{repo.primary_lang}</Chip> : null}
+                      {repo.is_fork ? <Chip tone="warn">fork</Chip> : null}
                     </div>
-                    <div className="mt-0.5 truncate text-[12px] text-[var(--text-dim)]">
-                      {repo.description || '—'}
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-dim)]">
-                      <Chip tone="accent">
-                        {t('github.repos.views14d', {
-                          recent: numberLabel(repoTraffic?.viewsRecent || 0),
-                          total: numberLabel(repoTraffic?.viewsCumulative || 0),
+                    <div className="flex flex-col items-end gap-0.5 text-[12px] text-[var(--text-mute)]">
+                      <div className="num whitespace-nowrap">
+                        ★ {numberLabel(repo.stars)} · ⑂ {numberLabel(repo.forks)}
+                      </div>
+                      <div
+                        className="whitespace-nowrap text-[11px] text-[var(--text-dim)]"
+                        title={formatPushed(repo.pushed_at)}
+                      >
+                        {t('github.repos.pushedRelative', {
+                          rel: relativeTime(repo.pushed_at, t),
                         })}
-                      </Chip>
-                      <Chip tone="success">
-                        {t('github.repos.clones14d', {
-                          recent: numberLabel(repoTraffic?.clonesRecent || 0),
-                          total: numberLabel(repoTraffic?.clonesCumulative || 0),
-                        })}
-                      </Chip>
-                      {repoTraffic?.lastDate ? (
-                        <span className="num text-[var(--text-faint)]">
-                          · {t('github.repos.lastSnapshot', { date: repoTraffic.lastDate })}
-                        </span>
-                      ) : null}
+                      </div>
                     </div>
                   </div>
-                  <div className="flex flex-col items-end gap-0.5 text-[12px] text-[var(--text-mute)]">
-                    <div className="num">
-                      ★ {numberLabel(repo.stars)} · ⑂ {numberLabel(repo.forks)}
+
+                  {/* Description + topics */}
+                  <div>
+                    <div className="line-clamp-2 text-[12px] text-[var(--text-dim)]">
+                      {repo.description || '—'}
                     </div>
-                    <div className="text-[11px] text-[var(--text-dim)]">
-                      {t('github.repos.push', { date: formatPushed(repo.pushed_at) })}
-                    </div>
+                    {repo.topics && repo.topics.length > 0 ? (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {repo.topics.slice(0, 5).map((topic) => (
+                          <span
+                            key={topic}
+                            className="inline-block rounded-full bg-[var(--surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--text-faint)]"
+                          >
+                            #{topic}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* 4 mini bar-charts on the same window: NPM / views /
+                      clones / commits. Each normalised on its own max so
+                      shapes are readable even on low-volume repos. */}
+                  <div className="grid grid-cols-4 gap-2 border-t border-[var(--border)] pt-2">
+                    <RepoMiniBarChart
+                      label={t('github.repos.npmCell')}
+                      values={metrics?.npm || emptyVec}
+                      color="#ff2d95"
+                    />
+                    <RepoMiniBarChart
+                      label={t('github.repos.viewsCell')}
+                      values={metrics?.views || emptyVec}
+                      color="#64d2ff"
+                    />
+                    <RepoMiniBarChart
+                      label={t('github.repos.clonesCell')}
+                      values={metrics?.clones || emptyVec}
+                      color="#30d158"
+                    />
+                    <RepoMiniBarChart
+                      label={t('github.repos.commitsCell')}
+                      values={metrics?.commits || emptyVec}
+                      color="#ffd60a"
+                    />
+                  </div>
+
+                  {/* Footer : last traffic snapshot date + viewsUniques for
+                      audience quality signal. Kept subtle. */}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0 text-[10.5px] text-[var(--text-faint)]">
+                    {repoTraffic?.lastDate ? (
+                      <span className="num">
+                        {t('github.repos.lastSnapshot', { date: repoTraffic.lastDate })}
+                      </span>
+                    ) : null}
+                    {repoTraffic && repoTraffic.viewsUniquesRecent > 0 ? (
+                      <>
+                        <span>·</span>
+                        <span className="num">
+                          {t('github.repos.uniques', {
+                            n: numberLabel(repoTraffic.viewsUniquesRecent),
+                          })}
+                        </span>
+                      </>
+                    ) : null}
                   </div>
                 </a>
               );
@@ -1289,290 +1436,6 @@ function SyncBanner({
   );
 }
 
-type Translator = (key: string, vars?: Record<string, string | number>) => string;
-
-const SYNC_KIND_LABELS: Record<SyncLogKind, string> = {
-  'github-all': 'GitHub · sync complet',
-  repos: 'GitHub · repos',
-  traffic: 'GitHub · trafic',
-  heatmap: 'GitHub · heatmap',
-  npm: 'npm · downloads',
-};
-
-const SYNC_TRIGGER_LABELS: Record<SyncLogTrigger, string> = {
-  manual: 'manuel',
-  auto: 'auto',
-  background: 'bg',
-};
-
-function syncStatusTone(status: SyncLogStatus): 'success' | 'warn' | 'danger' | 'neutral' {
-  switch (status) {
-    case 'ok':
-      return 'success';
-    case 'no-change':
-      return 'neutral';
-    case 'partial':
-      return 'warn';
-    case 'error':
-      return 'danger';
-  }
-}
-
-function SyncLogPanel({
-  entries,
-  status,
-  filter,
-  onFilterChange,
-  onRefresh,
-  onRefreshNpm,
-  onSyncGithub,
-  isSyncing,
-  isRefreshingNpm,
-  t,
-}: {
-  entries: SyncLogEntry[];
-  status: GithubStatus | null;
-  filter: 'all' | 'github' | 'npm' | 'heatmap';
-  onFilterChange: (value: 'all' | 'github' | 'npm' | 'heatmap') => void;
-  onRefresh: () => void;
-  onRefreshNpm: () => void;
-  onSyncGithub: () => void;
-  isSyncing: boolean;
-  isRefreshingNpm: boolean;
-  t: Translator;
-}) {
-  const filtered = entries.filter((entry) => {
-    if (filter === 'all') return true;
-    if (filter === 'heatmap') return entry.kind === 'heatmap';
-    if (filter === 'npm') return entry.kind === 'npm';
-    return entry.kind !== 'npm' && entry.kind !== 'heatmap';
-  });
-
-  const sources: Array<{
-    key: 'repos' | 'traffic' | 'heatmap' | 'npm';
-    label: string;
-    at: number | null;
-  }> = [
-    { key: 'repos', label: 'repos', at: status?.reposLastSync ?? null },
-    { key: 'traffic', label: 'traffic', at: status?.trafficLastSync ?? null },
-    { key: 'heatmap', label: 'heatmap', at: status?.heatmapLastSync ?? null },
-    {
-      key: 'npm',
-      label: 'npm',
-      at: deriveLatestByKind(entries, 'npm'),
-    },
-  ];
-
-  return (
-    <Section
-      title={t('github.syncLog.title')}
-      meta={t('github.syncLog.meta', { count: filtered.length })}
-      action={
-        <div className="flex items-center gap-2">
-          <Button tone="ghost" onClick={onRefresh} title="refresh log">
-            ↻
-          </Button>
-          <Button
-            tone="ghost"
-            onClick={onRefreshNpm}
-            disabled={isRefreshingNpm}
-            title="refresh npm"
-          >
-            {isRefreshingNpm ? '…' : 'npm'}
-          </Button>
-          <Button tone="accent" onClick={onSyncGithub} disabled={isSyncing} title="sync github">
-            {isSyncing ? '…' : 'GH'}
-          </Button>
-        </div>
-      }
-    >
-      <Card>
-        <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {sources.map((source) => (
-            <SourceFreshnessPill key={source.key} label={source.label} at={source.at} t={t} />
-          ))}
-        </div>
-
-        <Toolbar>
-          <Segmented<'all' | 'github' | 'npm' | 'heatmap'>
-            value={filter}
-            options={[
-              { value: 'all', label: t('github.syncLog.filters.all') },
-              { value: 'github', label: 'GitHub' },
-              { value: 'heatmap', label: 'heatmap' },
-              { value: 'npm', label: 'npm' },
-            ]}
-            onChange={onFilterChange}
-          />
-        </Toolbar>
-
-        {filtered.length === 0 ? (
-          <div className="mt-3">
-            <Empty>{t('github.syncLog.empty')}</Empty>
-          </div>
-        ) : (
-          <ul className="mt-3 max-h-[420px] space-y-2 overflow-y-auto pr-1">
-            {filtered.map((entry) => (
-              <SyncLogRow key={entry.id} entry={entry} t={t} />
-            ))}
-          </ul>
-        )}
-      </Card>
-    </Section>
-  );
-}
-
-function deriveLatestByKind(entries: SyncLogEntry[], kind: SyncLogKind): number | null {
-  for (const entry of entries) {
-    if (entry.kind === kind && entry.status !== 'error') {
-      return entry.at;
-    }
-  }
-  return null;
-}
-
-function SourceFreshnessPill({
-  label,
-  at,
-  t,
-}: {
-  label: string;
-  at: number | null;
-  t: Translator;
-}) {
-  const tone: 'success' | 'warn' | 'danger' | 'neutral' = !at
-    ? 'neutral'
-    : Math.floor(Date.now() / 1000) - at < 60 * 60
-      ? 'success'
-      : Math.floor(Date.now() / 1000) - at < 24 * 3600
-        ? 'warn'
-        : 'danger';
-  return (
-    <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-2.5 py-1.5">
-      <div className="flex items-center gap-1.5">
-        <Dot tone={tone} />
-        <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
-          {label}
-        </span>
-      </div>
-      <div className="mt-0.5 truncate text-[11px] text-[var(--text-mute)]">
-        {at ? relativeTime(at, t) : '—'}
-      </div>
-    </div>
-  );
-}
-
-function SyncLogRow({ entry, t }: { entry: SyncLogEntry; t: Translator }) {
-  const tone = syncStatusTone(entry.status);
-  const borderTone =
-    tone === 'success'
-      ? 'border-l-[#30d158]'
-      : tone === 'warn'
-        ? 'border-l-[#ffd60a]'
-        : tone === 'danger'
-          ? 'border-l-[#ff453a]'
-          : 'border-l-[var(--border-strong)]';
-
-  return (
-    <li
-      className={`rounded-[var(--radius)] border border-[var(--border)] border-l-2 bg-[var(--surface-1)] px-3 py-2 ${borderTone}`}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[13px] font-medium text-[var(--text)]">
-            {SYNC_KIND_LABELS[entry.kind] || entry.kind}
-          </span>
-          <Chip className="text-[10.5px]">{SYNC_TRIGGER_LABELS[entry.trigger]}</Chip>
-          <Chip tone={tone} className="text-[10.5px]">
-            {entry.status}
-          </Chip>
-        </div>
-        <span
-          className="num shrink-0 text-[11px] text-[var(--text-dim)]"
-          title={new Date(entry.at * 1000).toLocaleString(dateLocale(currentLocale()))}
-        >
-          {relativeTime(entry.at, t)}
-        </span>
-      </div>
-      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-[var(--text-dim)]">
-        {entry.durationMs !== null ? (
-          <span className="num text-[var(--text-mute)]">{formatDuration(entry.durationMs)}</span>
-        ) : null}
-        <SyncSummary entry={entry} />
-      </div>
-    </li>
-  );
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms} ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
-  return `${Math.round(ms / 1000)} s`;
-}
-
-function SyncSummary({ entry }: { entry: SyncLogEntry }) {
-  const s = entry.summary || {};
-
-  if (entry.status === 'error') {
-    return (
-      <span className="truncate text-[#ffc6c1]" title={String(s.error || '')}>
-        {String(s.error || 'erreur inconnue')}
-      </span>
-    );
-  }
-
-  if (entry.kind === 'github-all') {
-    const delta = (s.delta as Record<string, unknown>) || {};
-    const synced = (s.synced as Record<string, unknown>) || {};
-    const parts: string[] = [];
-    if (Number(delta.newRepos) > 0) parts.push(`+${Number(delta.newRepos)} repos`);
-    if (Number(delta.newTrafficRows) > 0)
-      parts.push(`+${Number(delta.newTrafficRows)} traffic rows`);
-    if (Number(delta.newTrafficRepos) > 0)
-      parts.push(`+${Number(delta.newTrafficRepos)} traffic repos`);
-    if (Number(delta.newHeatmapDays) > 0) parts.push(`+${Number(delta.newHeatmapDays)} jours`);
-    if (Number(delta.heatmapTotalDelta) !== 0)
-      parts.push(`Δcontribs ${Number(delta.heatmapTotalDelta)}`);
-    if (Number(synced.trafficErrors) > 0)
-      parts.push(`${Number(synced.trafficErrors)} erreurs trafic`);
-    if (parts.length === 0)
-      parts.push(`${Number(synced.repos) || 0} repos · ${Number(synced.trafficRepos) || 0} trafic`);
-    return <SummaryLine parts={parts} />;
-  }
-
-  if (entry.kind === 'heatmap') {
-    const parts: string[] = [];
-    if (Number(s.daysDelta) > 0) parts.push(`+${Number(s.daysDelta)} jours`);
-    if (Number(s.totalDelta) !== 0) parts.push(`Δcontribs ${Number(s.totalDelta)}`);
-    if (s.year) parts.push(String(s.year));
-    if (parts.length === 0) parts.push(`${Number(s.heatmapDays) || 0} jours en base`);
-    return <SummaryLine parts={parts} />;
-  }
-
-  if (entry.kind === 'npm') {
-    const parts: string[] = [];
-    if (Number(s.updated) > 0) parts.push(`${Number(s.updated)} pkgs màj`);
-    if (Number(s.skipped) > 0) parts.push(`${Number(s.skipped)} skip`);
-    if (Number(s.notFound) > 0) parts.push(`${Number(s.notFound)} not_found`);
-    if (parts.length === 0) parts.push('aucun changement');
-    return <SummaryLine parts={parts} />;
-  }
-
-  return null;
-}
-
-function SummaryLine({ parts }: { parts: string[] }) {
-  return (
-    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[var(--text-mute)]">
-      {parts.map((part, idx) => (
-        <span key={`${idx}-${part}`} className="num">
-          {part}
-        </span>
-      ))}
-    </span>
-  );
-}
-
 function RepoSparklineCard({
   rank,
   repoName,
@@ -1690,7 +1553,156 @@ type NpmStats = {
   lastFetchedAt: number | null;
 };
 
-function NpmDownloadsStat({ deltaWindowDays }: { deltaWindowDays: number }) {
+/**
+ * Inline traffic cell for a repo card (views OR clones).
+ * Layout: label + big number on top, 14-day sparkline middle, uniques +
+ * cumulative total bottom. Fixed sparkline viewBox so cards align no matter
+ * the repo's magnitude (scale is intentionally relative-per-repo so shapes
+ * are readable even on low-traffic repos).
+ */
+type Translator = (key: string, vars?: Record<string, string | number>) => string;
+function RepoTrafficCell({
+  label,
+  recent,
+  uniques,
+  cumul,
+  sparkPath,
+  stroke,
+  t,
+}: {
+  label: string;
+  recent: number | undefined;
+  uniques: number | undefined;
+  cumul: number | undefined;
+  sparkPath: string;
+  stroke: string;
+  t: Translator;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="flex items-baseline gap-2">
+        <span className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+          {label}
+        </span>
+        <span className="num text-[14px] font-medium text-[var(--text)]">
+          {numberLabel(recent || 0)}
+        </span>
+      </div>
+      <svg
+        viewBox="0 0 100 22"
+        preserveAspectRatio="none"
+        className="my-1 h-[22px] w-full"
+        aria-hidden="true"
+      >
+        {sparkPath ? (
+          <path d={sparkPath} fill="none" stroke={stroke} strokeWidth={1.2} />
+        ) : (
+          <line
+            x1={0}
+            y1={11}
+            x2={100}
+            y2={11}
+            stroke="var(--border)"
+            strokeDasharray="2 2"
+            strokeWidth={0.6}
+          />
+        )}
+      </svg>
+      <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0 text-[10.5px] text-[var(--text-faint)]">
+        <span className="num">{t('github.repos.uniques', { n: numberLabel(uniques || 0) })}</span>
+        <span>·</span>
+        <span className="num">Σ {numberLabel(cumul || 0)}</span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Compact vertical bar chart for a repo card — 4 of these stack into the
+ * NPM / Views / Clones / Commits grid. Each bar is one day, normalized to
+ * the series' own max so the shape is readable regardless of magnitude.
+ * Scales automatically at any window size (14 → 365 days): bars get thinner
+ * as the window widens, viewBox+preserveAspectRatio does the rest.
+ */
+function RepoMiniBarChart({
+  label,
+  values,
+  color,
+}: {
+  label: string;
+  values: number[];
+  color: string;
+}) {
+  const total = values.reduce((acc, v) => acc + (v || 0), 0);
+  const max = values.reduce((acc, v) => Math.max(acc, v || 0), 0);
+  const viewW = Math.max(1, values.length);
+  const viewH = 22;
+  // One bar per data point: width = column width minus 15% gutter so bars
+  // don't fuse into a solid block at 14/30 day windows. Baseline y = viewH.
+  const barW = 0.85;
+  const barOffset = (1 - barW) / 2;
+  return (
+    <div className="min-w-0">
+      <div className="flex items-baseline justify-between gap-1">
+        <span className="text-[9.5px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+          {label}
+        </span>
+        <span className="num text-[11px] font-medium text-[var(--text)]">{numberLabel(total)}</span>
+      </div>
+      <svg
+        viewBox={`0 0 ${viewW} ${viewH}`}
+        preserveAspectRatio="none"
+        className="mt-1 h-[22px] w-full"
+        aria-hidden="true"
+      >
+        {max === 0 ? (
+          <line
+            x1={0}
+            y1={viewH - 1}
+            x2={viewW}
+            y2={viewH - 1}
+            stroke="var(--border)"
+            strokeDasharray="2 2"
+            strokeWidth={0.6}
+            vectorEffect="non-scaling-stroke"
+          />
+        ) : (
+          values
+            .map((v, i) => {
+              const h = max > 0 ? ((v || 0) / max) * viewH : 0;
+              // Keyed by day offset. Bar positions are strictly time-aligned
+              // and stable within a single render (no filtering, no reorder),
+              // so the index is a correct key here. We pre-skip zero-height
+              // bars after building the list so the key set stays stable.
+              return { i, h };
+            })
+            .filter((b) => b.h > 0)
+            .map(({ i, h }) => (
+              <rect
+                key={`d${i}`}
+                x={i + barOffset}
+                y={viewH - h}
+                width={barW}
+                height={h}
+                fill={color}
+                opacity={0.85}
+              />
+            ))
+        )}
+      </svg>
+    </div>
+  );
+}
+
+function NpmDownloadsStat({
+  deltaWindowDays,
+  isAllTime,
+  labelSuffix,
+}: {
+  deltaWindowDays: number;
+  isAllTime: boolean;
+  labelSuffix: string;
+}) {
   const [data, setData] = useState<NpmStats | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -1713,25 +1725,35 @@ function NpmDownloadsStat({ deltaWindowDays }: { deltaWindowDays: number }) {
 
   const periodKey: 'last_day' | 'last_week' | 'last_month' =
     deltaWindowDays === 1 ? 'last_day' : deltaWindowDays <= 7 ? 'last_week' : 'last_month';
-  const headline = data ? data.totals[periodKey] : 0;
+  // In all-time mode the headline is the cumulative local total, not a
+  // rolling window — otherwise the card would show "30j" numbers while every
+  // other Stat shows all-time.
+  const headline = data ? (isAllTime ? data.totals.cumul_local : data.totals[periodKey]) : 0;
   const publishedCount = data?.published.length ?? 0;
 
-  // Show the two non-selected periods so the user has the full picture; the
-  // selected one is already the headline.
+  // Secondary breakdown: in all-time, surface the three rolling windows for
+  // context; otherwise show the two non-selected periods.
   const secondary: Array<{ label: string; value: number }> = data
-    ? [
-        { label: '1j', value: data.totals.last_day },
-        { label: '7j', value: data.totals.last_week },
-        { label: '30j', value: data.totals.last_month },
-      ].filter((r) => r.label !== `${deltaWindowDays}j`)
+    ? isAllTime
+      ? [
+          { label: '1j', value: data.totals.last_day },
+          { label: '7j', value: data.totals.last_week },
+          { label: '30j', value: data.totals.last_month },
+        ]
+      : [
+          { label: '1j', value: data.totals.last_day },
+          { label: '7j', value: data.totals.last_week },
+          { label: '30j', value: data.totals.last_month },
+        ].filter((r) => r.label !== `${deltaWindowDays}j`)
     : [];
 
   const cumul = data?.totals.cumul_local ?? 0;
-  const showCumul = cumul > 0;
+  // All-time already puts cumul in the headline — no need to repeat it.
+  const showCumul = cumul > 0 && !isAllTime;
 
   return (
     <Stat
-      label={`npm · ${deltaWindowDays}j`}
+      label={`npm · ${labelSuffix}`}
       value={loading && !data ? '…' : numberLabel(headline)}
       hint={
         data ? (
@@ -1771,9 +1793,14 @@ function DeltaHint({
   period,
 }: {
   delta: { current: number; previous: number; pct: number; positive: boolean };
-  period: 'day' | 'week' | 'month';
+  period: 'day' | 'week' | 'month' | 'all';
 }) {
   const { t } = useTranslation();
+  // All-time has no "previous period" to compare to — showing a Δ here would
+  // be fabricated. Render just the cumulative label.
+  if (period === 'all') {
+    return <span className="text-[var(--text-dim)]">Σ · {t('common.allTime')}</span>;
+  }
   const label =
     period === 'day'
       ? t('github.deltaHint.suffixDay')

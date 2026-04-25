@@ -5,6 +5,7 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, extname, join, resolve } from 'node:path';
 import type { Settings } from '../config';
 import { expandHomePath } from '../config';
+import { backfillProjectIds } from '../jobs/usageByProjectSync';
 
 type ProjectType = 'node' | 'python' | 'rust' | 'go' | 'git' | 'mixed' | 'generic';
 
@@ -219,13 +220,34 @@ async function readReadmeExcerpt(
   return { excerpt: null, readmePath: null };
 }
 
+// 8 s timeout: git status / git log / git rev-parse on a healthy repo
+// returns in <500 ms. The cap protects the scanner against a wedged
+// `.git/index.lock`, NFS hang, or "huge repo" outlier from blocking the
+// whole project rescan cycle.
 async function runCommand(args: string[], cwd: string): Promise<string | null> {
   const proc = Bun.spawn(args, { cwd, stdout: 'pipe', stderr: 'ignore' });
-  const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-  if (code !== 0) {
-    return null;
+  const term = setTimeout(() => {
+    try {
+      proc.kill('SIGTERM');
+    } catch {
+      // already exited
+    }
+  }, 8_000);
+  const hardKill = setTimeout(() => {
+    try {
+      proc.kill('SIGKILL');
+    } catch {
+      // already exited
+    }
+  }, 11_000);
+  try {
+    const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    if (code !== 0) return null;
+    return out.trim();
+  } finally {
+    clearTimeout(term);
+    clearTimeout(hardKill);
   }
-  return out.trim();
 }
 
 async function getGitMeta(path: string): Promise<GitMeta> {
@@ -828,6 +850,11 @@ export async function scanAllProjects(
 
   const setKv = db.query('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)');
   setKv.run('last_scan_at', String(Math.floor(Date.now() / 1000)));
+
+  // Reclaim usage rows that were written with NULL project_id because this
+  // project wasn't yet known at ingest time. Safe to run on every scan — a
+  // no-op when nothing matches.
+  backfillProjectIds(db);
 
   return {
     scanned,

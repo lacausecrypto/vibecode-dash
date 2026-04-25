@@ -73,12 +73,12 @@ function scheduleNpmAutoRefresh(db: Database): void {
   const startedAt = Date.now();
   npmAutoRefreshInflight = refreshNpmDownloads({ db, force: false })
     .then((res) => {
-      const hasWork = res.updated > 0 || res.notFound > 0;
+      const hasWork = res.updated > 0 || res.notFound > 0 || res.rangeErrors > 0;
       if (hasWork) {
         recordSyncEvent(db, {
           kind: 'npm',
           trigger: 'auto',
-          status: res.updated > 0 ? 'ok' : 'no-change',
+          status: res.rangeErrors > 0 ? 'partial' : res.updated > 0 ? 'ok' : 'no-change',
           durationMs: Date.now() - startedAt,
           summary: res,
         });
@@ -141,7 +141,14 @@ export function registerGithubRoutes(app: Hono): void {
   app.get('/api/github/heatmap', async (c) => {
     const db = getDb();
     const settings = await loadSettings();
-    const year = Number.parseInt(c.req.query('year') || String(new Date().getUTCFullYear()), 10);
+    // Clamp year to [2008, currentYear]. GitHub was founded in 2008; anything
+    // earlier has no contributions. The upper bound blocks `?year=9999`-style
+    // abuse that would balloon the GraphQL window variables.
+    const currentYear = new Date().getUTCFullYear();
+    const rawYear = Number.parseInt(c.req.query('year') || String(currentYear), 10);
+    const year = Number.isFinite(rawYear)
+      ? Math.max(2008, Math.min(currentYear, rawYear))
+      : currentYear;
 
     const latest = db
       .query<{ synced_at: number }, []>(
@@ -212,8 +219,54 @@ export function registerGithubRoutes(app: Hono): void {
 
   app.get('/api/github/repos', (c) => {
     const db = getDb();
-    const rows = db.query('SELECT * FROM github_repos ORDER BY pushed_at DESC, stars DESC').all();
-    return c.json(rows);
+    const rows = db
+      .query<
+        {
+          name: string;
+          description: string | null;
+          stars: number;
+          forks: number;
+          primary_lang: string | null;
+          pushed_at: number | null;
+          url: string | null;
+          topics_json: string | null;
+          is_fork: number | null;
+        },
+        []
+      >(
+        `SELECT name, description, stars, forks, primary_lang, pushed_at, url,
+                topics_json, is_fork
+         FROM github_repos
+         ORDER BY pushed_at DESC, stars DESC`,
+      )
+      .all();
+    // Parse topics_json → string[], coerce is_fork → boolean. Keeps the wire
+    // shape flat and predictable for the client (no JSON parsing downstream).
+    const normalized = rows.map((r) => {
+      let topics: string[] = [];
+      if (r.topics_json) {
+        try {
+          const parsed = JSON.parse(r.topics_json);
+          if (Array.isArray(parsed)) {
+            topics = parsed.filter((t): t is string => typeof t === 'string');
+          }
+        } catch {
+          // malformed topics_json — treat as empty; don't crash the list
+        }
+      }
+      return {
+        name: r.name,
+        description: r.description,
+        stars: r.stars,
+        forks: r.forks,
+        primary_lang: r.primary_lang,
+        pushed_at: r.pushed_at,
+        url: r.url,
+        topics,
+        is_fork: Boolean(r.is_fork),
+      };
+    });
+    return c.json(normalized);
   });
 
   app.get('/api/github/npm', async (c) => {
@@ -227,7 +280,7 @@ export function registerGithubRoutes(app: Hono): void {
         recordSyncEvent(db, {
           kind: 'npm',
           trigger: 'manual',
-          status: res.updated > 0 ? 'ok' : 'no-change',
+          status: res.rangeErrors > 0 ? 'partial' : res.updated > 0 ? 'ok' : 'no-change',
           durationMs: Date.now() - startedAt,
           summary: res,
         });
@@ -265,7 +318,7 @@ export function registerGithubRoutes(app: Hono): void {
       recordSyncEvent(db, {
         kind: 'npm',
         trigger: 'manual',
-        status: res.updated > 0 ? 'ok' : 'no-change',
+        status: res.rangeErrors > 0 ? 'partial' : res.updated > 0 ? 'ok' : 'no-change',
         durationMs: Date.now() - startedAt,
         summary: res,
       });
@@ -299,7 +352,8 @@ export function registerGithubRoutes(app: Hono): void {
 
   app.get('/api/github/activity', (c) => {
     const db = getDb();
-    const days = Number.parseInt(c.req.query('days') || '30', 10);
+    const rawDays = Number.parseInt(c.req.query('days') || '30', 10);
+    const days = Number.isFinite(rawDays) ? Math.max(1, Math.min(365, rawDays)) : 30;
     const minTs = Math.floor(Date.now() / 1000) - days * 86400;
 
     const commits = db
@@ -313,7 +367,8 @@ export function registerGithubRoutes(app: Hono): void {
 
   app.get('/api/github/traffic', (c) => {
     const db = getDb();
-    const days = Math.max(1, Number.parseInt(c.req.query('days') || '14', 10));
+    const rawDays = Number.parseInt(c.req.query('days') || '14', 10);
+    const days = Number.isFinite(rawDays) ? Math.max(1, Math.min(90, rawDays)) : 14;
     const now = new Date();
     const cutoff = new Date(
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)),
@@ -437,6 +492,116 @@ export function registerGithubRoutes(app: Hono): void {
       rows,
       reposWithTraffic: new Set(rows.map((row) => row.repo)).size,
     });
+  });
+
+  /**
+   * Per-repo daily metrics for small in-card bar charts: npm downloads,
+   * traffic views, traffic clones, commit count. One request, 4 zero-filled
+   * vectors per repo aligned on the same day window — callers pick a repo
+   * by name and draw 4 bar sparks without any extra plumbing.
+   */
+  app.get('/api/github/repo-metrics', (c) => {
+    const db = getDb();
+    // 365d is the ceiling: npm API only keeps a year, traffic has at most
+    // 14 d of upstream history (we accumulate but older than ~6 mo gets
+    // sparse), commits go back further. Above 365 we'd be mixing regimes.
+    const days = Math.min(365, Math.max(1, Number.parseInt(c.req.query('days') || '14', 10)));
+    const now = new Date();
+    const startMs = Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate() - (days - 1),
+    );
+    const cutoff = new Date(startMs).toISOString().slice(0, 10);
+    const dates: string[] = [];
+    for (let i = 0; i < days; i += 1) {
+      dates.push(new Date(startMs + i * 86_400_000).toISOString().slice(0, 10));
+    }
+    const dateIndex = new Map(dates.map((d, i) => [d, i]));
+
+    // Seed every known repo with zero-filled vectors so low-traffic repos
+    // still show a card (empty bars → visibly calm, not "missing").
+    const reposList = db
+      .query<{ name: string }, []>('SELECT name FROM github_repos ORDER BY name ASC')
+      .all();
+    const perRepo = new Map<
+      string,
+      { views: number[]; clones: number[]; commits: number[]; npm: number[] }
+    >();
+    for (const r of reposList) {
+      perRepo.set(r.name, {
+        views: new Array(days).fill(0),
+        clones: new Array(days).fill(0),
+        commits: new Array(days).fill(0),
+        npm: new Array(days).fill(0),
+      });
+    }
+    const ensure = (repo: string) => {
+      let v = perRepo.get(repo);
+      if (!v) {
+        v = {
+          views: new Array(days).fill(0),
+          clones: new Array(days).fill(0),
+          commits: new Array(days).fill(0),
+          npm: new Array(days).fill(0),
+        };
+        perRepo.set(repo, v);
+      }
+      return v;
+    };
+
+    const trafficRows = db
+      .query<{ repo: string; date: string; v: number; c: number }, [string]>(
+        `SELECT repo, date,
+                COALESCE(views_count, 0) AS v,
+                COALESCE(clones_count, 0) AS c
+         FROM github_repo_traffic_daily
+         WHERE date >= ?`,
+      )
+      .all(cutoff);
+    for (const row of trafficRows) {
+      const idx = dateIndex.get(row.date);
+      if (idx === undefined) continue;
+      const bucket = ensure(row.repo);
+      bucket.views[idx] += Number(row.v || 0);
+      bucket.clones[idx] += Number(row.c || 0);
+    }
+
+    const commitRows = db
+      .query<{ repo: string; date: string; n: number }, [string]>(
+        `SELECT repo, date, COUNT(*) AS n
+         FROM github_commits
+         WHERE date >= ?
+         GROUP BY repo, date`,
+      )
+      .all(cutoff);
+    for (const row of commitRows) {
+      const idx = dateIndex.get(row.date);
+      if (idx === undefined) continue;
+      ensure(row.repo).commits[idx] = Number(row.n || 0);
+    }
+
+    const npmRows = db
+      .query<{ repo_name: string; date: string; downloads: number }, [string]>(
+        `SELECT repo_name, date, downloads
+         FROM npm_downloads_daily
+         WHERE date >= ?`,
+      )
+      .all(cutoff);
+    for (const row of npmRows) {
+      const idx = dateIndex.get(row.date);
+      if (idx === undefined) continue;
+      ensure(row.repo_name).npm[idx] = Number(row.downloads || 0);
+    }
+
+    const result = [...perRepo.entries()].map(([repo, v]) => ({
+      repo,
+      views: v.views,
+      clones: v.clones,
+      commits: v.commits,
+      npm: v.npm,
+    }));
+    return c.json({ days, cutoff, dates, repos: result });
   });
 
   app.post('/api/github/sync', async (c) => {

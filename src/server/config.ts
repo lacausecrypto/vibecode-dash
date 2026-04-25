@@ -53,7 +53,51 @@ const SettingsSchema = z.object({
     githubSyncMinutes: z.number().min(1),
     obsidianSyncMinutes: z.number().min(1).default(10),
     usageSyncMinutes: z.number().min(1),
+    presenceScanMinutes: z.number().min(5).default(45),
+    presenceEngagementPollMinutes: z.number().min(15).default(60),
   }),
+  presence: z
+    .object({
+      // Scoring and drafting both go through the Claude or Codex CLI so the
+      // user's existing subscription / OAuth covers the cost. OpenRouter is
+      // reserved for image generation only. Each stage picks its own model
+      // from the live catalog at /api/agent/models.
+      drafterProvider: z.enum(['claude', 'codex']).default('claude'),
+      scorerModel: z.string().default('claude-haiku-4-5-20251001'),
+      drafterModel: z.string().default('claude-sonnet-4-6'),
+      // X API PAYG cost per read. Default 0.017 ≈ $0.60 / 35 reads (observed
+      // bill on Basic tier). Overrideable so the user can keep the ledger
+      // honest if their tier changes.
+      xReadCostUsd: z.number().min(0).default(0.017),
+      // Auto scheduler kill-switch. Default OFF — scans run only when the
+      // user clicks "Scan now" in the UI. Toggling this back on (via the
+      // Settings tab) takes effect on the next scheduler tick without a
+      // server restart, because the scheduler reads the flag at run time.
+      // The expire_stale sweep stays on regardless (it's free + DB-only).
+      autoScanEnabled: z.boolean().default(false),
+      // Hard cap on cumulative cost ledger spend per LOCAL calendar day.
+      // 0 = no cap. Checked before each scan; if today's spend already meets
+      // or exceeds the cap, the scan aborts with `budget_exceeded: true` so
+      // the UI can surface the reason. Manual scan-now respects the cap too
+      // (no escape hatch — that defeats the safety net).
+      dailyBudgetUsd: z.number().min(0).default(0.5),
+      // Engagement polling is INDEPENDENT of autoScanEnabled: it's mostly
+      // free (Reddit public permalink.json + X syndication CDN), so the user
+      // who turned auto-scan off to save money still wants their posted
+      // drafts tracked. Default ON; turn off only if you don't want any
+      // background activity at all. Manual /engagement-poll-now bypasses
+      // this flag the same way scan-now bypasses TTL.
+      engagementPollEnabled: z.boolean().default(true),
+    })
+    .default({
+      drafterProvider: 'claude',
+      scorerModel: 'claude-haiku-4-5-20251001',
+      drafterModel: 'claude-sonnet-4-6',
+      xReadCostUsd: 0.017,
+      autoScanEnabled: false,
+      dailyBudgetUsd: 0.5,
+      engagementPollEnabled: true,
+    }),
   subscriptions: z
     .object({
       usdToEur: z.number().positive().default(0.93),
@@ -94,6 +138,17 @@ function buildDefaults(): Settings {
       githubSyncMinutes: 30,
       obsidianSyncMinutes: 10,
       usageSyncMinutes: 10,
+      presenceScanMinutes: 45,
+      presenceEngagementPollMinutes: 60,
+    },
+    presence: {
+      drafterProvider: 'claude',
+      scorerModel: 'claude-haiku-4-5-20251001',
+      drafterModel: 'claude-sonnet-4-6',
+      xReadCostUsd: 0.017,
+      autoScanEnabled: false,
+      dailyBudgetUsd: 0.5,
+      engagementPollEnabled: true,
     },
     subscriptions: {
       usdToEur: 0.93,

@@ -1,7 +1,11 @@
-import { type PropsWithChildren, useCallback, useEffect, useMemo, useState } from 'react';
+import { type PropsWithChildren, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { emitActivity } from '../lib/activityBus';
 import { useTranslation } from '../lib/i18n';
 import { type ActionId, formatBinding, useBindings, useShortcut } from '../lib/shortcuts';
+import { Mascot } from './Mascot';
+import { MenuUsageMini } from './MenuUsageMini';
+import { PresenceBadge } from './PresenceBadge';
 import { Dot } from './ui';
 
 type NavEntry = { to: string; key: string; action: ActionId };
@@ -14,8 +18,16 @@ const NAV_ITEMS: readonly NavEntry[] = [
   { to: '/usage', key: 'usage', action: 'nav.usage' },
   { to: '/agent', key: 'agent', action: 'nav.agent' },
   { to: '/radar', key: 'radar', action: 'nav.radar' },
+  { to: '/presence', key: 'presence', action: 'nav.presence' },
   { to: '/settings', key: 'settings', action: 'nav.settings' },
 ] as const;
+
+type PresenceFeedSummary = {
+  proposed: number;
+  proposed_unviewed: number;
+  dying_within_1h: number;
+  dying_within_24h: number;
+};
 
 export function Layout({ children }: PropsWithChildren) {
   const navigate = useNavigate();
@@ -23,13 +35,79 @@ export function Layout({ children }: PropsWithChildren) {
   const { t } = useTranslation();
   const [healthStatus, setHealthStatus] = useState<'checking' | 'ok' | 'down'>('checking');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [presenceFeed, setPresenceFeed] = useState<PresenceFeedSummary | null>(null);
+  // Track the previous summary so we can detect deltas and emit a
+  // notification activity when something newly noteworthy lands (drives
+  // the Mascot's notification sprite). We use a ref instead of state
+  // because the comparison is internal to the polling effect — no render
+  // needs to react to it.
+  const prevPresenceRef = useRef<PresenceFeedSummary | null>(null);
+
+  // Poll the presence feed summary every 30 s for the nav badge. Cheap
+  // (a single SQLite COUNT query server-side, < 5 ms typical), and the
+  // result drives the urgency pastille beside the "Presence" nav item.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchSummary = async () => {
+      try {
+        const { apiGet } = await import('../lib/api');
+        const data = await apiGet<PresenceFeedSummary>('/api/presence/feed-summary');
+        if (cancelled) return;
+        setPresenceFeed(data);
+
+        // Notification heuristic: any of the urgency counters grew since
+        // the previous tick. We skip the first tick (prev = null) so the
+        // mascot doesn't flash notification on every page load. Rationale
+        // for these specific deltas:
+        //  - proposed_unviewed ↑: a new draft is queued for review.
+        //  - dying_within_1h ↑: something needs attention soon.
+        //  - dying_within_24h ↑ (only if 1h didn't already grow): same
+        //    thing on a longer horizon.
+        const prev = prevPresenceRef.current;
+        if (prev) {
+          const reasons: string[] = [];
+          if (data.proposed_unviewed > prev.proposed_unviewed) {
+            reasons.push(`${data.proposed_unviewed - prev.proposed_unviewed} new draft(s) queued`);
+          }
+          if (data.dying_within_1h > prev.dying_within_1h) {
+            reasons.push(`${data.dying_within_1h - prev.dying_within_1h} item(s) dying within 1h`);
+          } else if (data.dying_within_24h > prev.dying_within_24h) {
+            reasons.push(
+              `${data.dying_within_24h - prev.dying_within_24h} item(s) dying within 24h`,
+            );
+          }
+          if (reasons.length > 0) {
+            emitActivity({
+              kind: 'notification',
+              reason: reasons.join(' · '),
+              at: Date.now(),
+            });
+          }
+        }
+        prevPresenceRef.current = data;
+      } catch {
+        // Silent: badge just disappears if the call fails (server down etc.)
+      }
+    };
+    void fetchSummary();
+    const id = setInterval(() => void fetchSummary(), 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   const bindings = useBindings();
   const nav = useMemo(
     () =>
       NAV_ITEMS.map((item) => ({
         ...item,
-        label: item.key === 'radar' ? 'Radar' : t(`nav.${item.key}`),
+        label:
+          item.key === 'radar'
+            ? 'Radar'
+            : item.key === 'presence'
+              ? t('nav.presence')
+              : t(`nav.${item.key}`),
         hint: formatBinding(bindings[item.action]),
       })),
     [t, bindings],
@@ -75,6 +153,7 @@ export function Layout({ children }: PropsWithChildren) {
   const goUsage = useCallback(() => navigate('/usage'), [navigate]);
   const goAgent = useCallback(() => navigate('/agent'), [navigate]);
   const goRadar = useCallback(() => navigate('/radar'), [navigate]);
+  const goPresence = useCallback(() => navigate('/presence'), [navigate]);
   const goSettings = useCallback(() => navigate('/settings'), [navigate]);
   useShortcut('nav.overview', goOverview);
   useShortcut('nav.projects', goProjects);
@@ -83,6 +162,7 @@ export function Layout({ children }: PropsWithChildren) {
   useShortcut('nav.usage', goUsage);
   useShortcut('nav.agent', goAgent);
   useShortcut('nav.radar', goRadar);
+  useShortcut('nav.presence', goPresence);
   useShortcut('nav.settings', goSettings);
   useShortcut('nav.agentJump', goAgent);
 
@@ -139,6 +219,9 @@ export function Layout({ children }: PropsWithChildren) {
         }`}
       >
         <aside className="app-sidebar hidden md:block">
+          <div className="mb-2 flex items-center justify-center">
+            <Mascot size={96} />
+          </div>
           <nav className="flex flex-col gap-0.5">
             {nav.map((item) => (
               <NavLink
@@ -151,7 +234,12 @@ export function Layout({ children }: PropsWithChildren) {
                   (item.to !== '/' && location.pathname.startsWith(item.to))
                 }
               >
-                <span>{item.label}</span>
+                <span className="flex items-center gap-1.5">
+                  {item.label}
+                  {item.key === 'presence' && presenceFeed ? (
+                    <PresenceBadge summary={presenceFeed} />
+                  ) : null}
+                </span>
                 <kbd>{item.hint}</kbd>
               </NavLink>
             ))}
@@ -165,6 +253,10 @@ export function Layout({ children }: PropsWithChildren) {
               <kbd>/</kbd> {t('nav.searchHint')} ·{' '}
               <kbd>{formatBinding(bindings['nav.agentJump'])}</kbd> {t('nav.agentHint')}
             </span>
+          </div>
+
+          <div className="mt-3">
+            <MenuUsageMini />
           </div>
         </aside>
 

@@ -3,6 +3,20 @@ import { useSearchParams } from 'react-router-dom';
 import { Markdown } from '../components/Markdown';
 import { Button, Card, Chip, Empty, FieldLabel, Section, Segmented } from '../components/ui';
 import { DEFAULT_MODEL, MODEL_CATALOG, type ProviderId } from '../lib/agentModels';
+
+/**
+ * One entry of the merged-catalog response from `/api/agent/models`.
+ * Shape mirrors the server's MergedModel but we declare it locally rather
+ * than cross-import server types.
+ */
+type MergedModel = {
+  id: string;
+  label: string;
+  hintKey: string | null;
+  source: 'catalog' | 'config' | 'history';
+  recentDays?: number;
+  recentCalls?: number;
+};
 import {
   type AgentMode,
   getAgentMode,
@@ -574,6 +588,11 @@ export default function AgentRoute() {
     () => (lsGet(LS_KEYS.newProvider) as 'claude' | 'codex' | null) || 'claude',
   );
   const [newModel, setNewModel] = useState(() => lsGet(LS_KEYS.newModel) || '');
+  // Merged model catalog for the active provider. Populated from
+  // /api/agent/models (static base + ~/.{codex,claude}/config + 60 d of
+  // JSONL history). Falls back to the static import if the endpoint fails,
+  // so the selector is never empty even offline.
+  const [mergedModels, setMergedModels] = useState<MergedModel[] | null>(null);
   const [newCwd, setNewCwd] = useState(() => lsGet(LS_KEYS.newCwd) || '');
   const [newTitle, setNewTitle] = useState('');
 
@@ -714,6 +733,27 @@ export default function AgentRoute() {
   }, [timeoutSec]);
   useEffect(() => {
     lsSet(LS_KEYS.newProvider, newProvider);
+  }, [newProvider]);
+
+  // Fetch merged model catalog whenever the user flips provider. Stored
+  // separately from the static MODEL_CATALOG so a failed fetch still leaves
+  // something usable in the dropdown.
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ provider: ProviderId; models: MergedModel[] }>(
+      `/api/agent/models?provider=${newProvider}`,
+    )
+      .then((resp) => {
+        if (!cancelled && Array.isArray(resp.models) && resp.models.length > 0) {
+          setMergedModels(resp.models);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setMergedModels(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [newProvider]);
   useEffect(() => {
     lsSet(LS_KEYS.newModel, newModel);
@@ -1506,11 +1546,23 @@ export default function AgentRoute() {
                         onChange={(event) => setNewModel(event.target.value)}
                         className="!py-1 !text-[12px]"
                       >
-                        {MODEL_CATALOG[newProvider].map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.label}
-                          </option>
-                        ))}
+                        {(mergedModels ?? MODEL_CATALOG[newProvider]).map((m) => {
+                          // Tag non-catalog entries so the user sees where
+                          // the model came from. Static catalog entries keep
+                          // their clean label unchanged.
+                          const suffix =
+                            'source' in m && m.source === 'config'
+                              ? ' · config'
+                              : 'source' in m && m.source === 'history'
+                                ? ' · history'
+                                : '';
+                          return (
+                            <option key={m.id} value={m.id}>
+                              {m.label}
+                              {suffix}
+                            </option>
+                          );
+                        })}
                       </select>
                       <input
                         value={newTitle}
@@ -2403,7 +2455,7 @@ function MessageBubble({
       </header>
 
       {isAssistant ? (
-        <Markdown content={message.content || t('agent.message.emptyContent')} />
+        <Markdown content={message.content || t('agent.message.emptyContent')} breaks />
       ) : (
         <pre className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--text)]">
           {message.content || t('agent.message.emptyContent')}
@@ -2847,7 +2899,7 @@ function StreamingBubble({
         </span>
       </header>
       <ActivityTimeline items={activities} />
-      <Markdown content={text} />
+      <Markdown content={text} breaks />
       {showPulse ? (
         <span className="pulse-accent mt-1 inline-block h-3 w-[2px] bg-[var(--accent)]" />
       ) : null}

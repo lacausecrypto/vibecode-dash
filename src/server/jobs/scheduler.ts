@@ -1,8 +1,14 @@
 import { loadSettings } from '../config';
 import { getDb } from '../db';
+import { expireStaleDrafts } from '../lib/presence';
+import { refreshPersonaAntiPatterns } from '../lib/presencePersona';
+import { refreshAllSourceHealth } from '../lib/sourceHealth';
 import { syncGithubAll } from '../scanners/githubSync';
 import { reindexObsidianVault } from '../scanners/obsidianScanner';
 import { scanAllProjects } from '../scanners/projectScanner';
+import { getCodexLiveRateLimits } from '../wrappers/codexOauth';
+import { pollPresenceEngagement } from './presenceEngagement';
+import { runPresenceScan } from './presenceScan';
 import { syncUsageByProject } from './usageByProjectSync';
 import { syncUsageDaily } from './usageSync';
 
@@ -92,6 +98,86 @@ export async function startScheduler(): Promise<void> {
       intervalMs: Math.max(15, settings.schedules.usageSyncMinutes) * 60_000,
       run: async () => {
         await syncUsageByProject(db, { windowDays: 95 });
+      },
+    },
+    {
+      // Keep the Codex rate-limits cache warm so the dashboard always has a
+      // < 2 min old reading without the user having to hit the page. Matches
+      // the Codex CLI's own polling cadence (~60 s when active). Silently
+      // skips when no auth.json is present; the route falls back to the
+      // JSONL snapshot in that case.
+      name: 'codex_rate_limits_refresh',
+      intervalMs: 120_000,
+      run: async () => {
+        await getCodexLiveRateLimits();
+      },
+    },
+    {
+      // Sweep the drafts feed: anything still 'proposed' past its
+      // freshness_expires_at becomes 'expired'. Kept as its own job (not
+      // bundled with the scanner) so expiry still happens if the scanner
+      // is disabled via connection removal, and so the /presence page never
+      // shows drafts past their optimal window.
+      name: 'presence_expire_stale',
+      intervalMs: Math.max(5, settings.schedules.presenceScanMinutes) * 60_000,
+      run: async () => {
+        expireStaleDrafts(db);
+      },
+    },
+    {
+      // Scan all active presence sources, dispatched per platform. Gated on
+      // `presence.autoScanEnabled` (default off) so the user has to opt in
+      // explicitly via the Settings UI. We re-load settings each tick so
+      // toggling the flag takes effect on the next interval without a
+      // server restart.
+      name: 'presence_scan',
+      intervalMs: settings.schedules.presenceScanMinutes * 60_000,
+      run: async () => {
+        const live = await loadSettings();
+        if (!live.presence?.autoScanEnabled) return;
+        await runPresenceScan(db, live);
+      },
+    },
+    {
+      // Snapshot engagement metrics. INDEPENDENT of auto-scan because:
+      //   - Reddit polls are free in both modes (public permalink.json or
+      //     authenticated /api/info — no PAYG charge either way).
+      //   - X polls are free via the syndication CDN fallback when no
+      //     Bearer is set; if Bearer IS set, ~$0.017 per due-but-not-yet-
+      //     snapshotted draft (rare event, capped to 3 polls per posted
+      //     draft total at t+1h / t+24h / t+7d).
+      // The user who turns auto-scan off still wants engagement on their
+      // posted drafts. Gated on its own `engagementPollEnabled` flag (default
+      // true) so the user can fully disable background activity if they want.
+      name: 'presence_engagement_poll',
+      intervalMs: settings.schedules.presenceEngagementPollMinutes * 60_000,
+      run: async () => {
+        const live = await loadSettings();
+        if (live.presence?.engagementPollEnabled === false) return;
+        await pollPresenceEngagement(db);
+      },
+    },
+    {
+      // Daily: classify each source into a health band (Pack B). Pure SQL +
+      // TS, no external calls, runs in <100 ms even with hundreds of sources.
+      // Always on — health insight is useful regardless of auto-scan toggle.
+      name: 'presence_health_refresh',
+      intervalMs: 24 * 60 * 60 * 1000, // 24 h
+      run: async () => {
+        refreshAllSourceHealth(db);
+      },
+    },
+    {
+      // Weekly: rebuild Persona/anti_patterns.md in the vault from recent
+      // edit signals. Always runs (independent of auto-scan toggle) —
+      // anti-patterns are derived from data the user has already edited
+      // manually, so refreshing them costs nothing externally and keeps
+      // the drafter's voice aligned with the user's actual rewrites.
+      name: 'presence_persona_refresh',
+      intervalMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+      run: async () => {
+        const live = await loadSettings();
+        await refreshPersonaAntiPatterns(db, live);
       },
     },
   ];

@@ -1,6 +1,7 @@
 import type { Database } from 'bun:sqlite';
 import { currentLocale, t as serverT } from '../lib/i18n';
 import { keychain } from '../lib/keychain';
+import { fetchWithTimeout, spawnWithTimeout } from '../lib/safeFetch';
 
 const QUERY_CALENDAR = `
   query($login: String!, $from: DateTime, $to: DateTime) {
@@ -28,17 +29,29 @@ type GithubContributionDay = {
   color: string;
 };
 
+// Accept any representation GitHub might emit (ISO 8601 string, epoch number,
+// missing) and normalize to a finite integer seconds-since-epoch, or null on
+// failure. Used for repo.pushed_at and similar date fields; never returns NaN
+// which would crash strict-mode SQLite INTEGER binding.
+function toEpochSeconds(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? Math.floor(value) : null;
+  }
+  if (typeof value === 'string' && value.length > 0) {
+    const ms = new Date(value).getTime();
+    return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+  }
+  return null;
+}
+
+// Hands off to the shared spawn-with-timeout wrapper. 10 s is plenty for
+// `gh auth token` (local op) — we never want the GitHub sync to hang on a
+// broken or zombie gh process.
 async function runCommand(
   args: string[],
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-  const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe' });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-
-  return { stdout, stderr, code };
+  return spawnWithTimeout(args, 10_000);
 }
 
 async function githubToken(): Promise<string> {
@@ -72,15 +85,23 @@ export async function syncGithubHeatmap(db: Database, login: string, year?: numb
   const from = new Date(Date.UTC(y, 0, 1, 0, 0, 0)).toISOString();
   const to = new Date(Date.UTC(y, 11, 31, 23, 59, 59)).toISOString();
 
-  const response = await fetch('https://api.github.com/graphql', {
-    method: 'POST',
-    headers: {
-      authorization: `bearer ${token}`,
-      'content-type': 'application/json',
-      'user-agent': 'vibecode-dash',
+  // 20 s timeout: GraphQL contributions calendar usually returns in <2 s
+  // but GitHub will occasionally tarpit unauthorized / rate-limited callers
+  // for tens of seconds. A bounded timeout means a failed sync attempt
+  // surfaces as an error instead of a hung scheduler tick.
+  const response = await fetchWithTimeout(
+    'https://api.github.com/graphql',
+    {
+      method: 'POST',
+      headers: {
+        authorization: `bearer ${token}`,
+        'content-type': 'application/json',
+        'user-agent': 'vibecode-dash',
+      },
+      body: JSON.stringify({ query: QUERY_CALENDAR, variables: { login, from, to } }),
     },
-    body: JSON.stringify({ query: QUERY_CALENDAR, variables: { login, from, to } }),
-  });
+    20_000,
+  );
 
   if (!response.ok) {
     const body = await response.text();
@@ -119,8 +140,24 @@ export async function syncGithubHeatmap(db: Database, login: string, year?: numb
       synced_at = excluded.synced_at
   `);
 
+  // Validate each day before touching SQL. DB runs in strict mode, so passing
+  // `undefined` for a NOT NULL column aborts the whole sync — a schema change
+  // on GitHub's side would silently freeze the heatmap with no recovery.
+  let skipped = 0;
   for (const day of weeks) {
-    upsert.run(day.date, day.contributionCount, day.color, nowTs);
+    if (
+      typeof day.date !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(day.date) ||
+      typeof day.contributionCount !== 'number' ||
+      !Number.isFinite(day.contributionCount)
+    ) {
+      skipped += 1;
+      continue;
+    }
+    upsert.run(day.date, day.contributionCount, day.color ?? null, nowTs);
+  }
+  if (skipped > 0) {
+    console.warn(`[github] heatmap: skipped ${skipped} malformed day(s) from GraphQL response`);
   }
 
   db.query('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)').run(
@@ -184,7 +221,7 @@ export async function syncGithubRepos(db: Database, login: string): Promise<numb
   `);
 
   while (true) {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://api.github.com/users/${encodeURIComponent(login)}/repos?per_page=100&sort=pushed&page=${page}`,
       {
         headers: {
@@ -193,6 +230,7 @@ export async function syncGithubRepos(db: Database, login: string): Promise<numb
           'user-agent': 'vibecode-dash',
         },
       },
+      20_000,
     );
 
     if (!response.ok) {
@@ -200,22 +238,37 @@ export async function syncGithubRepos(db: Database, login: string): Promise<numb
       throw new Error(`GitHub REST error ${response.status}: ${body}`);
     }
 
-    const repos = (await response.json()) as GithubRepo[];
+    const payload = (await response.json()) as unknown;
+    if (!Array.isArray(payload)) {
+      // GitHub returns {message, documentation_url} on auth/rate-limit errors
+      // with a 200. Treat as terminal and surface.
+      throw new Error(
+        `GitHub REST /repos returned non-array payload: ${JSON.stringify(payload).slice(0, 200)}`,
+      );
+    }
+    const repos = payload as GithubRepo[];
     if (repos.length === 0) {
       break;
     }
 
     for (const repo of repos) {
+      if (typeof repo.name !== 'string' || repo.name.length === 0) {
+        console.warn('[github] repos: skipping entry without valid name');
+        continue;
+      }
+      // repo.pushed_at may be missing on freshly-created repos; new Date(undefined)
+      // yields NaN, which strict-mode SQLite rejects → whole sync aborts.
+      const pushedAtSec = toEpochSeconds(repo.pushed_at);
       upsert.run(
         repo.name,
-        repo.description,
-        repo.html_url,
-        repo.stargazers_count,
-        repo.forks_count,
-        repo.language,
+        repo.description ?? null,
+        repo.html_url ?? null,
+        Number.isFinite(repo.stargazers_count) ? repo.stargazers_count : 0,
+        Number.isFinite(repo.forks_count) ? repo.forks_count : 0,
+        repo.language ?? null,
         JSON.stringify({ [repo.language || 'unknown']: 1 }),
-        JSON.stringify(repo.topics || []),
-        Math.floor(new Date(repo.pushed_at).getTime() / 1000),
+        JSON.stringify(Array.isArray(repo.topics) ? repo.topics : []),
+        pushedAtSec,
         repo.fork ? 1 : 0,
         nowTs,
       );
@@ -239,7 +292,7 @@ async function fetchGithubTrafficWindow(
   repo: string,
   kind: 'views' | 'clones',
 ): Promise<GithubTrafficPoint[]> {
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(repo)}/traffic/${kind}`,
     {
       headers: {
@@ -248,6 +301,7 @@ async function fetchGithubTrafficWindow(
         'user-agent': 'vibecode-dash',
       },
     },
+    15_000,
   );
 
   if (!response.ok) {
@@ -290,7 +344,13 @@ export async function syncGithubTraffic(
   let syncedDays = 0;
   const errors: string[] = [];
 
-  for (const row of repos) {
+  // Per-repo concurrency cap. Without it, 100 repos × 2 fetches kicks off
+  // 200 simultaneous calls to GitHub — easy to trip secondary-rate-limit
+  // protection ("abuse detection"). 4 in flight is conservative: each batch
+  // makes 8 calls (2 endpoints × 4 repos), well under GitHub's documented
+  // 5000-req/h primary quota even on a 4-min cycle.
+  const PER_REPO_CONCURRENCY = 4;
+  const processRepo = async (row: { name: string }) => {
     try {
       const [views, clones] = await Promise.all([
         fetchGithubTrafficWindow(token, login, row.name, 'views'),
@@ -345,6 +405,13 @@ export async function syncGithubTraffic(
     } catch (error) {
       errors.push(`${row.name}: ${String(error)}`);
     }
+  };
+
+  // Process repos in fixed-size batches. Each batch runs in parallel; the
+  // outer loop awaits batch completion before starting the next.
+  for (let i = 0; i < repos.length; i += PER_REPO_CONCURRENCY) {
+    const batch = repos.slice(i, i + PER_REPO_CONCURRENCY);
+    await Promise.all(batch.map((row) => processRepo(row)));
   }
 
   db.query('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)').run(

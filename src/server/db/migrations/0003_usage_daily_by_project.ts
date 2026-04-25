@@ -1,5 +1,20 @@
 export const version = 3;
 
+// Column semantics by source (IMPORTANT: read before touching):
+//   - input_tokens : Claude = non-cached input billed normally.
+//                    Codex  = inputNet (raw - cached_input).
+//                    i.e. in BOTH cases, "fresh input tokens".
+//   - cache_create : Claude = tokens written to cache.
+//                    Codex  = always 0 (no cache-write concept).
+//   - cache_read   : Claude = tokens read from cache.
+//                    Codex  = cached_input_tokens (input billed at cached rate).
+//                    Semantically equivalent concept (input reused from a cache),
+//                    so summing this column across sources is meaningful.
+//   - output_tokens: Codex folds reasoning_output into this (we lose the split here).
+//   - messages     : Claude = assistant messages. Codex = turns.
+// Keep queries aware: per-source aggregation is safe, cross-source sums on
+// cache_read are meaningful, but cost_usd already encodes the per-source rate
+// so do NOT re-derive costs from the token columns without source context.
 export const sql = `
 CREATE TABLE IF NOT EXISTS usage_daily_by_project (
   date           TEXT NOT NULL,         -- YYYY-MM-DD (UTC)

@@ -11,6 +11,12 @@ import * as migration0007 from './migrations/0007_npm_downloads';
 import * as migration0008 from './migrations/0008_npm_daily';
 import * as migration0009 from './migrations/0009_health_breakdown';
 import * as migration0010 from './migrations/0010_github_sync_log';
+import * as migration0011 from './migrations/0011_drop_usage_by_project';
+import * as migration0012 from './migrations/0012_reliability_cleanup';
+import * as migration0013 from './migrations/0013_social_presence';
+import * as migration0014 from './migrations/0014_source_validation';
+import * as migration0015 from './migrations/0015_source_health';
+import * as migration0016 from './migrations/0016_prune_cooldown';
 
 type Migration = {
   version: number;
@@ -28,6 +34,12 @@ const MIGRATIONS: Migration[] = [
   migration0008,
   migration0009,
   migration0010,
+  migration0011,
+  migration0012,
+  migration0013,
+  migration0014,
+  migration0015,
+  migration0016,
 ].sort((a, b) => a.version - b.version);
 
 let dbInstance: Database | null = null;

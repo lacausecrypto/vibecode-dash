@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite';
+import { resolve } from 'node:path';
 import { expandHomePath, loadSettings } from '../config';
 import { buildCodexDailyByProject } from '../wrappers/codexJsonlParser';
 import { type DailyProjectAggregate, buildClaudeDailyByProject } from '../wrappers/jsonlParser';
@@ -7,6 +8,43 @@ type KnownProject = { id: string; name: string; path: string };
 
 function knownProjectsFromDb(db: Database): KnownProject[] {
   return db.query<KnownProject, []>('SELECT id, name, path FROM projects').all();
+}
+
+// Resolve a missing projectId by matching project_path against known projects.
+// Needed because inferProjectIdentity() may return { projectId: null } when
+// usage rows are written BEFORE the project table is populated (typical on
+// first boot). Without this backfill, those rows stay permanently invisible
+// to project-id-filtered queries (cost breakdowns, project detail page).
+export function backfillProjectIds(db: Database, knownProjects?: KnownProject[]): number {
+  const projects = knownProjects ?? knownProjectsFromDb(db);
+  return backfillProjectIdsImpl(db, projects);
+}
+
+function backfillProjectIdsImpl(db: Database, knownProjects: KnownProject[]): number {
+  if (knownProjects.length === 0) return 0;
+  const byResolvedPath = new Map<string, string>();
+  for (const p of knownProjects) {
+    byResolvedPath.set(resolve(p.path), p.id);
+  }
+
+  const orphans = db
+    .query<{ project_path: string }, []>(
+      'SELECT DISTINCT project_path FROM usage_daily_by_project WHERE project_id IS NULL AND project_path IS NOT NULL',
+    )
+    .all();
+
+  const update = db.query<unknown, [string, string]>(
+    'UPDATE usage_daily_by_project SET project_id = ? WHERE project_path = ? AND project_id IS NULL',
+  );
+  let fixed = 0;
+  for (const row of orphans) {
+    const match = byResolvedPath.get(resolve(row.project_path));
+    if (match) {
+      const res = update.run(match, row.project_path);
+      fixed += res.changes;
+    }
+  }
+  return fixed;
 }
 
 function upsertRow(db: Database, row: DailyProjectAggregate, now: number): void {
@@ -102,6 +140,7 @@ export async function syncUsageByProject(
     for (const row of codex.rows) {
       upsertRow(db, row as DailyProjectAggregate, nowSec);
     }
+    backfillProjectIdsImpl(db, knownProjects);
   });
   apply();
 

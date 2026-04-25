@@ -137,7 +137,22 @@ export function authMiddleware(opts: AuthOptions): MiddlewareHandler {
     const path = c.req.path;
     if (UNGATED_PATHS.has(path)) return next();
 
-    const provided = c.req.header(TOKEN_HEADER);
+    // Header is the canonical transport — all code paths that can set custom
+    // headers (our `apiGet` helper, fetch callers) use it.
+    //
+    // Fallback: for GET only, accept the token via `?token=…` query param.
+    // This exists for DOM resource requests where we can't inject headers:
+    // `<img src>`, `<video src>`, `<a download>`. Restricted to GET so we
+    // never weaken CSRF protection on state-changing routes — POST/PUT
+    // still require the header even if an attacker got the token into a URL.
+    //
+    // Token exposure risk is acceptable for our loopback-only model: token
+    // lands in browser history and server logs, but the server is already
+    // 127.0.0.1-gated and the token is per-user. Rotating the token (delete
+    // the auth-token file) still invalidates any stale URLs immediately.
+    const headerToken = c.req.header(TOKEN_HEADER);
+    const queryToken = method === 'GET' ? c.req.query('token') : undefined;
+    const provided = headerToken || queryToken;
     if (!provided || !tokensEqual(provided, opts.token)) {
       return deny(c, 'missing or invalid token');
     }

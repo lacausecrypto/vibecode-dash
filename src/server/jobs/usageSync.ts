@@ -41,7 +41,7 @@ export async function syncUsageDaily(db: Database, days = 30): Promise<number> {
       Number(row.cacheReadTokens || 0),
       Number(row.totalCost || 0),
       '{}',
-      'claude-code',
+      'claude',
       syncedAt,
     );
     count += 1;

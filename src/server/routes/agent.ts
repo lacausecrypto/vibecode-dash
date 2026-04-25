@@ -6,6 +6,7 @@ import { AGENT_MODES, type AgentMode, type Locale, getAgentMode } from '../../sh
 import { todayIso } from '../../shared/dates';
 import { type Settings, expandHomePath, loadSettings } from '../config';
 import { getDb } from '../db';
+import { getMergedAgentModels } from '../lib/agentModels';
 import { getTokenPath, loadOrCreateToken } from '../lib/auth';
 import {
   RECENT_TURNS,
@@ -1011,6 +1012,25 @@ export function registerAgentRoutes(app: Hono): void {
       mode: 'cli',
       providers: PROVIDERS,
     });
+  });
+
+  /**
+   * Merged model catalog: static base + ~/.{codex,claude}/config + JSONL
+   * history over the last 60 days. Lets the UI surface models the user
+   * already runs even when they're not in our hardcoded list.
+   */
+  app.get('/api/agent/models', async (c) => {
+    const providerQ = c.req.query('provider');
+    if (providerQ !== 'claude' && providerQ !== 'codex') {
+      return c.json({ error: 'invalid_provider' }, 400);
+    }
+    try {
+      const models = await getMergedAgentModels(getDb(), providerQ);
+      return c.json({ provider: providerQ, models });
+    } catch (error) {
+      console.warn('[agent/models] merge failed', error);
+      return c.json({ error: 'merge_failed', details: String(error) }, 500);
+    }
   });
 
   app.post('/api/agent/context', async (c) => {

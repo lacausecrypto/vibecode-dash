@@ -599,7 +599,12 @@ export function ProjectsUsageLLM({ projects: externalProjects }: Props) {
     const usedEur = Math.min(totalRealEur, accruedWithDataEur);
     const idleWithDataEur = Math.max(0, accruedWithDataEur - usedEur);
     const noDataEur = Math.max(0, accruedEur - accruedWithDataEur);
-    const prepaidEur = Math.max(0, cashEur - accruedEur);
+    // Prepaid now computed per-charge inside computeBillingCost (tail after
+    // asOfTs, restricted to charges debited in the window). Previous
+    // `cash − accrued` leaked pre-window charges' tail-accrual and
+    // under-stated prepaid whenever an older charge was still running at
+    // the start of the window.
+    const prepaidEur = billing.prepaid.total;
 
     // Dénominateur "utilisation effective" : jours mesurables uniquement
     const measurableEur = usedEur + idleWithDataEur;
@@ -1466,6 +1471,8 @@ function SubscriptionVsPaygStat({
     claude: number;
     codex: number;
     accrued: { total: number; claude: number; codex: number };
+    prepaid: { total: number; claude: number; codex: number };
+    activeDaily: { total: number; claude: number; codex: number };
     activeMonthly: { total: number; claude: number; codex: number };
   };
   paygEur: number;
@@ -1496,12 +1503,16 @@ function SubscriptionVsPaygStat({
   if (source !== 'claude' && billing.codex > 0) {
     hintParts.push(`Codex ${formatEur(billing.codex, locale)}`);
   }
+  // Active-rate hint: show €/day directly from the current charge's
+  // amount÷coverageDays. Previous version divided an "€/mo scaled to 30d"
+  // synthetic (220 × 30 / 32 = 206) which misrepresented the actual €220
+  // cycle cost and was confusing.
   const activeParts: string[] = [];
-  if (source !== 'codex' && billing.activeMonthly.claude > 0) {
-    activeParts.push(`Claude ${billing.activeMonthly.claude.toFixed(0)}`);
+  if (source !== 'codex' && billing.activeDaily.claude > 0) {
+    activeParts.push(`Claude ${formatEur(billing.activeDaily.claude, locale)}/j`);
   }
-  if (source !== 'claude' && billing.activeMonthly.codex > 0) {
-    activeParts.push(`Codex ${billing.activeMonthly.codex.toFixed(0)}`);
+  if (source !== 'claude' && billing.activeDaily.codex > 0) {
+    activeParts.push(`Codex ${formatEur(billing.activeDaily.codex, locale)}/j`);
   }
   const activeLabel =
     activeParts.length > 0
@@ -1644,19 +1655,21 @@ function SubscriptionVsPaygStat({
 
       {/* Prix effectifs : ramène les totaux à des unités "quotidien" / "par Mtok"
           pour donner une intuition stable hors fenêtre temporelle. */}
-      {billing.activeMonthly.total > 0 || paygEur > 0 ? (
+      {billing.activeDaily.total > 0 || paygEur > 0 ? (
         <div className="mt-3 grid grid-cols-3 gap-3 rounded-[var(--radius-sm)] bg-[rgba(255,255,255,0.02)] px-2.5 py-1.5">
           <MiniCost
             label={t('usage.llmPerProject.subVsPayg.aboPerDay')}
+            // Canonical "ABO/JOUR" = €/day of the currently-active charge
+            // (amount ÷ coverageDays, "newest wins" on overlap). No round-trip
+            // through a 30d-normalized €/mo — that previously introduced a
+            // coverage-dependent bias.
             value={
-              billing.activeMonthly.total > 0
-                ? formatEur(billing.activeMonthly.total / 30, locale)
-                : '—'
+              billing.activeDaily.total > 0 ? formatEur(billing.activeDaily.total, locale) : '—'
             }
             hint={
-              billing.activeMonthly.total > 0
+              billing.activeDaily.total > 0
                 ? t('usage.llmPerProject.subVsPayg.activeRateHint', {
-                    amount: formatEur(billing.activeMonthly.total, locale),
+                    amount: formatEur(billing.activeDaily.total * 30, locale),
                   })
                 : t('usage.llmPerProject.subVsPayg.noActiveAbo')
             }

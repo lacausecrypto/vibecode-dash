@@ -12,6 +12,7 @@ const VaultRoute = lazy(() => import('./routes/vault'));
 const UsageRoute = lazy(() => import('./routes/usage'));
 const AgentRoute = lazy(() => import('./routes/agent'));
 const RadarRoute = lazy(() => import('./routes/radar'));
+const PresenceRoute = lazy(() => import('./routes/presence'));
 const SettingsRoute = lazy(() => import('./routes/settings'));
 
 function RouteFallback() {
@@ -38,6 +39,7 @@ export default function App() {
             <Route path="/usage" element={<UsageRoute />} />
             <Route path="/agent" element={<AgentRoute />} />
             <Route path="/radar" element={<RadarRoute />} />
+            <Route path="/presence" element={<PresenceRoute />} />
             <Route path="/settings" element={<SettingsRoute />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

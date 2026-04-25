@@ -151,6 +151,13 @@ function usageFromMessage(message: Record<string, unknown> | null): {
     };
   }
 
+  // Anthropic emits cache-creation tokens in one of two shapes depending on
+  // the API version:
+  //   - top-level:  usage.cache_creation_input_tokens  (sum of all TTLs)
+  //   - nested:     usage.cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens
+  // Prefer top-level when present (already the sum). Fall back to summing the
+  // nested breakdown. If both are >0 (never observed in practice but guarded),
+  // the top-level wins — it's authoritative.
   const cacheCreation = asRecord(usage.cache_creation);
   const cacheCreationNested =
     asNumber(cacheCreation?.ephemeral_5m_input_tokens) +

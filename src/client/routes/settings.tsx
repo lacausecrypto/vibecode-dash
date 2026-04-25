@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { SyncLogSection } from '../components/SyncLogSection';
 import { Button, Card, Chip, ErrorBanner, FieldLabel, Section } from '../components/ui';
 import { apiGet, apiPost, apiPut } from '../lib/api';
 import { AVAILABLE_LOCALES, type Locale, dateLocale, useTranslation } from '../lib/i18n';
@@ -74,13 +75,14 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-type TabId = 'general' | 'data' | 'costs' | 'display' | 'shortcuts' | 'about';
+type TabId = 'general' | 'data' | 'costs' | 'display' | 'logs' | 'shortcuts' | 'about';
 
 const TAB_DEFS: Array<{ id: TabId; labelKey: string; hint?: string }> = [
   { id: 'general', labelKey: 'settings.tabs.general' },
   { id: 'data', labelKey: 'settings.tabs.data' },
   { id: 'costs', labelKey: 'settings.tabs.costs' },
   { id: 'display', labelKey: 'settings.tabs.display' },
+  { id: 'logs', labelKey: 'settings.tabs.logs' },
   { id: 'shortcuts', labelKey: 'settings.tabs.shortcuts' },
   { id: 'about', labelKey: 'settings.tabs.about' },
 ];
@@ -401,6 +403,9 @@ function SettingsPanels({
   }
   if (active === 'display') {
     return <PanelDisplay settings={settings} update={update} />;
+  }
+  if (active === 'logs') {
+    return <SyncLogSection />;
   }
   if (active === 'shortcuts') {
     return <PanelShortcuts />;

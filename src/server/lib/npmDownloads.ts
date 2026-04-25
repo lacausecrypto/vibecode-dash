@@ -31,14 +31,8 @@ const RANGE_DAYS = 365;
 const CONCURRENCY = 4;
 const FETCH_TIMEOUT_MS = 8000;
 
-type NpmPoint = { downloads: number; start: string; end: string; package: string };
-type NpmRange = {
-  downloads: Array<{ day: string; downloads: number }>;
-  start: string;
-  end: string;
-  package: string;
-};
-type NpmError = { error: string };
+// Unused — npm responses are now parsed as `unknown` and shape-checked at
+// runtime. See fetchPoint() / fetchRange() for the validation.
 
 async function fetchPoint(
   pkg: string,
@@ -49,18 +43,27 @@ async function fetchPoint(
     const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (res.status === 404) return null;
     if (!res.ok) return 0;
-    const body = (await res.json()) as NpmPoint | NpmError;
-    if ('error' in body) return null;
-    return Number.isFinite(body.downloads) ? body.downloads : 0;
+    const body = (await res.json()) as unknown;
+    if (!body || typeof body !== 'object') return 0;
+    const record = body as Record<string, unknown>;
+    if ('error' in record) return null;
+    const count = record.downloads;
+    // Guard against string returns (observed on proxied caches) and negatives.
+    return typeof count === 'number' && Number.isFinite(count) && count >= 0 ? count : 0;
   } catch {
     return 0;
   }
 }
 
-async function fetchRange(
-  pkg: string,
-  days: number,
-): Promise<Array<{ date: string; downloads: number }> | null> {
+// Distinguish between "upstream said package doesn't exist" (permanent skip)
+// and "network/rate-limit failure" (transient — caller should track so the UI
+// can flag stale cumul_local data).
+type FetchRangeResult =
+  | { kind: 'ok'; points: Array<{ date: string; downloads: number }> }
+  | { kind: 'not_found' }
+  | { kind: 'error'; reason: string };
+
+async function fetchRange(pkg: string, days: number): Promise<FetchRangeResult> {
   const end = new Date();
   end.setUTCHours(0, 0, 0, 0);
   const start = new Date(end);
@@ -70,15 +73,38 @@ async function fetchRange(
   const url = `${NPM_RANGE}/${startIso}:${endIso}/${encodeURIComponent(pkg)}`;
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    if (res.status === 404) return null;
-    if (!res.ok) return null;
-    const body = (await res.json()) as NpmRange | NpmError;
-    if ('error' in body) return null;
-    return body.downloads
-      .filter((d) => d && typeof d.day === 'string' && Number.isFinite(d.downloads))
+    if (res.status === 404) return { kind: 'not_found' };
+    if (!res.ok) return { kind: 'error', reason: `http_${res.status}` };
+    const body = (await res.json()) as unknown;
+    // Validate shape before trusting the response — npm Enterprise proxies
+    // have been seen to return HTML error pages with 200.
+    if (!body || typeof body !== 'object') {
+      return { kind: 'error', reason: 'bad_shape' };
+    }
+    const record = body as Record<string, unknown>;
+    if ('error' in record) {
+      return { kind: 'error', reason: String(record.error) };
+    }
+    if (!('downloads' in record)) {
+      return { kind: 'error', reason: 'bad_shape' };
+    }
+    const downloads = record.downloads;
+    if (!Array.isArray(downloads)) {
+      return { kind: 'error', reason: 'downloads_not_array' };
+    }
+    const points = downloads
+      .filter(
+        (d: unknown): d is { day: string; downloads: number } =>
+          !!d &&
+          typeof d === 'object' &&
+          typeof (d as { day?: unknown }).day === 'string' &&
+          Number.isFinite((d as { downloads?: unknown }).downloads) &&
+          (d as { downloads: number }).downloads >= 0,
+      )
       .map((d) => ({ date: d.day, downloads: d.downloads }));
-  } catch {
-    return null;
+    return { kind: 'ok', points };
+  } catch (error) {
+    return { kind: 'error', reason: String(error) };
   }
 }
 
@@ -111,11 +137,18 @@ function nowSec(): number {
 // npm's CF-rate-limited range endpoint in parallel, which compounds the
 // 400ms-between-calls backoff and historically triggered hangs. Concurrent
 // callers share the in-flight promise so only one pass hits the network.
-let refreshInflight: Promise<{ updated: number; notFound: number; skipped: number }> | null = null;
+type RefreshSummary = {
+  updated: number;
+  notFound: number;
+  skipped: number;
+  rangeErrors: number;
+};
+
+let refreshInflight: Promise<RefreshSummary> | null = null;
 
 export async function refreshNpmDownloads(
   opts: { db?: Database; force?: boolean } = {},
-): Promise<{ updated: number; notFound: number; skipped: number }> {
+): Promise<RefreshSummary> {
   if (refreshInflight) return refreshInflight;
   refreshInflight = runRefresh(opts).finally(() => {
     refreshInflight = null;
@@ -123,11 +156,7 @@ export async function refreshNpmDownloads(
   return refreshInflight;
 }
 
-async function runRefresh(opts: { db?: Database; force?: boolean }): Promise<{
-  updated: number;
-  notFound: number;
-  skipped: number;
-}> {
+async function runRefresh(opts: { db?: Database; force?: boolean }): Promise<RefreshSummary> {
   const db = opts.db ?? getDb();
   const settings = await loadSettings();
   const githubUser = settings.github.username || '';
@@ -145,7 +174,9 @@ async function runRefresh(opts: { db?: Database; force?: boolean }): Promise<{
     if (opts.force) return true;
     const cur = existing.get(r.name);
     if (!cur) return true;
-    return cur.fetched_at < staleCutoff;
+    // `<=` so a row exactly at TTL boundary is treated as stale (expires at
+    // TTL, not TTL + 1).
+    return cur.fetched_at <= staleCutoff;
   });
 
   const upsert = db.query<unknown, [string, string | null, number, number, number, number, number]>(
@@ -201,20 +232,43 @@ async function runRefresh(opts: { db?: Database; force?: boolean }): Promise<{
 
   // Phase 2: range backfill — serialized + delayed. npm's range endpoint is
   // CF-rate-limited more aggressively than point, so 1 at a time with a short
-  // pause is the polite default. Silent fail → cumul_local falls back to
-  // last_month via the listNpmStats coalesce.
+  // pause is the polite default.
+  //
+  // IMPORTANT: only UPSERT, never DELETE outside the response window.
+  // npm's /downloads/range returns 365 days max. Over time the local table
+  // accumulates >365 days of history from successive weekly refetches (week 1
+  // fills D-364..D0, week 52 fills D-12..D+364, etc.). A naive
+  // DELETE-then-upsert would wipe the legitimate accumulated history and make
+  // cumul_local drop at each refresh — this was the visible regression.
+  // npm returns zero-filled continuous ranges (never "removed" dates), so
+  // upsert alone is sufficient: any correction npm applies to a date within
+  // the 365-day window gets reflected, and older data we've already cached
+  // stays intact.
+  const rangeErrors: Array<{ pkg: string; reason: string }> = [];
   for (const { name, pkg } of resolvedTargets) {
-    const range = await fetchRange(pkg, RANGE_DAYS);
-    if (range && range.length > 0) {
+    const result = await fetchRange(pkg, RANGE_DAYS);
+    if (result.kind === 'ok') {
       const tx = db.transaction(() => {
-        for (const row of range) upsertDaily.run(name, row.date, row.downloads);
+        for (const row of result.points) upsertDaily.run(name, row.date, row.downloads);
       });
       tx();
+    } else if (result.kind === 'error') {
+      rangeErrors.push({ pkg, reason: result.reason });
     }
+    // kind === 'not_found' is silent: package genuinely not on npm.
     await new Promise((r) => setTimeout(r, 400));
   }
 
-  return { updated, notFound, skipped };
+  if (rangeErrors.length > 0) {
+    // Surfaced via the `skipped` field in caller summary — UI can warn that
+    // some cumul_local figures are stale. Keeps the caller signature stable.
+    console.warn(
+      `[npm] range backfill failed for ${rangeErrors.length} package(s):`,
+      rangeErrors.slice(0, 5),
+    );
+  }
+
+  return { updated, notFound, skipped, rangeErrors: rangeErrors.length };
 }
 
 export type NpmStats = {

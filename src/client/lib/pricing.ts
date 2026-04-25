@@ -308,33 +308,90 @@ function sumChargesInRange(charges: BillingCharge[], fromTs: number, toTs: numbe
   return total;
 }
 
-// Accrual basis: proration par overlap avec la coverage window de chaque charge.
-// Reflète le "coût de la période" au prorata, utile pour répartir par projet.
-function sumAccruedInRange(charges: BillingCharge[], fromTs: number, toTs: number): number {
+// Returns the most recent charge covering a given timestamp. Implements the
+// "newest wins" overlap rule so plan upgrades (older charge still technically
+// covering when the new one is debited) don't double-count.
+function activeChargeAt(
+  charges: BillingCharge[],
+  ts: number,
+): { amountEur: number; startTs: number; endTs: number; coverageDays: number } | null {
+  const sorted = [...charges].sort((a, b) => a.date.localeCompare(b.date));
+  for (let i = sorted.length - 1; i >= 0; i -= 1) {
+    const { startTs, endTs, coverageDays } = chargeCoverage(sorted, i);
+    if (ts >= startTs && ts < endTs) {
+      return { amountEur: sorted[i].amountEur, startTs, endTs, coverageDays };
+    }
+  }
+  return null;
+}
+
+// Accrual restricted to charges debited in [fromTs, toTs], capped at asOfTs
+// so "accrued" means "elapsed portion of the period already consumed" — not
+// "theoretical cost of the window". Combined with sumPrepaidInRange (tail
+// after asOfTs), the invariant `accrued + prepaid ≈ cash` holds for charges
+// fully contained in the window, and the Economy card breakdown sums to
+// cashEur cleanly. Pre-window charges are intentionally excluded: their
+// spill-over is already accounted for in the previous window's cash.
+function sumAccruedInRange(
+  charges: BillingCharge[],
+  fromTs: number,
+  toTs: number,
+  asOfTs: number,
+): number {
+  if (!charges || charges.length === 0 || toTs <= fromTs) {
+    return 0;
+  }
   const sorted = [...charges].sort((a, b) => a.date.localeCompare(b.date));
   let total = 0;
   for (let i = 0; i < sorted.length; i += 1) {
+    const chargeTs = dateIsoToTs(sorted[i].date);
+    if (chargeTs < fromTs || chargeTs > toTs) continue;
     const { startTs, endTs, coverageDays } = chargeCoverage(sorted, i);
-    const overlapStart = Math.max(startTs, fromTs);
-    const overlapEnd = Math.min(endTs, toTs);
-    if (overlapEnd <= overlapStart) {
-      continue;
-    }
-    const overlapDays = (overlapEnd - overlapStart) / DAY_SEC;
-    total += (sorted[i].amountEur * overlapDays) / coverageDays;
+    const elapsedEnd = Math.min(endTs, asOfTs, toTs);
+    const elapsedStart = Math.max(startTs, fromTs);
+    if (elapsedEnd <= elapsedStart) continue;
+    const elapsedDays = (elapsedEnd - elapsedStart) / DAY_SEC;
+    total += (sorted[i].amountEur * elapsedDays) / coverageDays;
   }
   return total;
 }
 
-function activeMonthlyRate(charges: BillingCharge[], asOfTs: number): number {
-  const sorted = [...charges].sort((a, b) => a.date.localeCompare(b.date));
-  for (let i = 0; i < sorted.length; i += 1) {
-    const { startTs, endTs, coverageDays } = chargeCoverage(sorted, i);
-    if (asOfTs >= startTs && asOfTs < endTs) {
-      return (sorted[i].amountEur * 30) / coverageDays;
-    }
+// Subscription € still to run after asOfTs, restricted to charges debited in
+// [fromTs, toTs]. Replaces the previous `cash − accrued` heuristic which
+// leaked pre-window charges into the prepaid bucket.
+function sumPrepaidInRange(
+  charges: BillingCharge[],
+  fromTs: number,
+  toTs: number,
+  asOfTs: number,
+): number {
+  let total = 0;
+  for (const charge of charges) {
+    const chargeTs = dateIsoToTs(charge.date);
+    if (chargeTs < fromTs || chargeTs > toTs) continue;
+    // coverageDays is resolved the same way chargeCoverage does, but we only
+    // need this charge's bounds — sort locally to find its index.
+    const sorted = [...charges].sort((a, b) => a.date.localeCompare(b.date));
+    const idx = sorted.findIndex((c) => c === charge);
+    const { endTs, coverageDays } = chargeCoverage(sorted, idx);
+    const remainingSec = Math.max(0, endTs - Math.max(asOfTs, chargeTs));
+    total += (charge.amountEur * (remainingSec / DAY_SEC)) / coverageDays;
   }
-  return 0;
+  return total;
+}
+
+// €/day of whichever charge is active right now (asOfTs). Sum directly rather
+// than routing through a synthetic monthly → /30 division: it's one fewer
+// place where a 30d≠month assumption can leak in.
+function activeDailyRate(charges: BillingCharge[], asOfTs: number): number {
+  const active = activeChargeAt(charges, asOfTs);
+  return active ? active.amountEur / active.coverageDays : 0;
+}
+
+function activeMonthlyRate(charges: BillingCharge[], asOfTs: number): number {
+  // Kept as convenience (some KPIs still want a €/mo framing). It's
+  // activeDailyRate × 30 — no re-derivation path so the two stay consistent.
+  return activeDailyRate(charges, asOfTs) * 30;
 }
 
 export type BillingCost = {
@@ -342,9 +399,15 @@ export type BillingCost = {
   total: number;
   claude: number;
   codex: number;
-  // Accrual basis: proration par coverage overlap. "Combien coûte la période."
+  // Accrual basis: prorata (newest charge wins on overlap). "Coût de la période."
   accrued: { total: number; claude: number; codex: number };
-  // Taux mensuel de l'abo actif à asOfTs. Stable indépendamment de la période.
+  // € still to run after asOfTs, restricted to charges debited in the window.
+  // Calculated per-charge (not cash − accrued) to avoid leaking pre-window
+  // charges' tail-accrual into the prepaid bucket.
+  prepaid: { total: number; claude: number; codex: number };
+  // €/day of whichever plan is active at asOfTs. Canonical "ABO/JOUR".
+  activeDaily: { total: number; claude: number; codex: number };
+  // Kept for callers that want a €/mo framing. = activeDaily × 30.
   activeMonthly: { total: number; claude: number; codex: number };
 };
 
@@ -361,11 +424,14 @@ export function computeBillingCost(
   const claudePaid = sumChargesInRange(claudeCharges, fromTs, toTs);
   const codexPaid = sumChargesInRange(codexCharges, fromTs, toTs);
 
-  const claudeAccrued = sumAccruedInRange(claudeCharges, fromTs, toTs);
-  const codexAccrued = sumAccruedInRange(codexCharges, fromTs, toTs);
+  const claudeAccrued = sumAccruedInRange(claudeCharges, fromTs, toTs, asOfTs);
+  const codexAccrued = sumAccruedInRange(codexCharges, fromTs, toTs, asOfTs);
 
-  const claudeActive = activeMonthlyRate(claudeCharges, asOfTs);
-  const codexActive = activeMonthlyRate(codexCharges, asOfTs);
+  const claudePrepaid = sumPrepaidInRange(claudeCharges, fromTs, toTs, asOfTs);
+  const codexPrepaid = sumPrepaidInRange(codexCharges, fromTs, toTs, asOfTs);
+
+  const claudeDaily = activeDailyRate(claudeCharges, asOfTs);
+  const codexDaily = activeDailyRate(codexCharges, asOfTs);
 
   return {
     total: claudePaid + codexPaid,
@@ -376,10 +442,20 @@ export function computeBillingCost(
       claude: claudeAccrued,
       codex: codexAccrued,
     },
+    prepaid: {
+      total: claudePrepaid + codexPrepaid,
+      claude: claudePrepaid,
+      codex: codexPrepaid,
+    },
+    activeDaily: {
+      total: claudeDaily + codexDaily,
+      claude: claudeDaily,
+      codex: codexDaily,
+    },
     activeMonthly: {
-      total: claudeActive + codexActive,
-      claude: claudeActive,
-      codex: codexActive,
+      total: (claudeDaily + codexDaily) * 30,
+      claude: claudeDaily * 30,
+      codex: codexDaily * 30,
     },
   };
 }

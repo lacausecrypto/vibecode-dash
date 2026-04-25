@@ -944,7 +944,7 @@ function NoteDetailView({
 
       <div className="max-h-[52vh] overflow-auto rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-alt)] p-4">
         {note.body?.trim() ? (
-          <Markdown content={note.body} />
+          <Markdown content={note.body} breaks />
         ) : (
           <p className="text-[12px] text-[var(--text-faint)]">{t('vault.detail.empty')}</p>
         )}

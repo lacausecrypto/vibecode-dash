@@ -16,6 +16,7 @@ export type ActionId =
   | 'nav.usage'
   | 'nav.agent'
   | 'nav.radar'
+  | 'nav.presence'
   | 'nav.settings'
   | 'nav.agentJump'
   | 'radar.scan'
@@ -30,6 +31,7 @@ export const ACTION_LABELS: Record<ActionId, string> = {
   'nav.usage': 'Usage',
   'nav.agent': 'Agent',
   'nav.radar': 'Radar',
+  'nav.presence': 'Presence',
   'nav.settings': 'Settings',
   'nav.agentJump': 'Agent (jump)',
   'radar.scan': 'Radar — scan concurrents',
@@ -45,7 +47,8 @@ export const DEFAULT_BINDINGS: Record<ActionId, string> = {
   'nav.usage': 'alt+5',
   'nav.agent': 'alt+6',
   'nav.radar': 'alt+7',
-  'nav.settings': 'alt+8',
+  'nav.presence': 'alt+8',
+  'nav.settings': 'alt+9',
   'nav.agentJump': 'meta+shift+k',
   'radar.scan': 's',
   'radar.generate': 'g',

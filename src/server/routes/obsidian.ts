@@ -39,6 +39,24 @@ function todayDailyPath(): string {
 }
 
 export function registerObsidianRoutes(app: Hono): void {
+  app.get('/api/obsidian/status', (c) => {
+    const db = getDb();
+    const kvRow = db
+      .query<{ value: string }, [string]>('SELECT value FROM kv WHERE key = ?')
+      .get('last_obsidian_index_at');
+    const indexedAt = kvRow ? Number.parseInt(kvRow.value, 10) : null;
+    const counts = db
+      .query<{ notes: number; links: number }, []>(
+        'SELECT (SELECT COUNT(*) FROM obsidian_notes) AS notes, (SELECT COUNT(*) FROM obsidian_links) AS links',
+      )
+      .get();
+    return c.json({
+      indexedAt: indexedAt && Number.isFinite(indexedAt) ? indexedAt : null,
+      noteCount: counts?.notes ?? 0,
+      linkCount: counts?.links ?? 0,
+    });
+  });
+
   app.get('/api/obsidian/notes', (c) => {
     const db = getDb();
     const limit = Math.min(Number.parseInt(c.req.query('limit') || '100', 10), 500);
@@ -52,6 +70,7 @@ export function registerObsidianRoutes(app: Hono): void {
           n.modified,
           n.size,
           n.tags_json,
+          n.indexed_at AS indexed_at,
           (SELECT COUNT(*) FROM obsidian_links l WHERE l.src = n.path) AS outgoing_count,
           (SELECT COUNT(*) FROM obsidian_links l WHERE l.dst = n.path) AS backlinks_count
          FROM obsidian_notes n

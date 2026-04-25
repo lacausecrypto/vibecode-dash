@@ -22,6 +22,7 @@ type ParsedNote = {
 };
 
 type NoteIndex = {
+  byPathExact: Map<string, string>;
   byPathLower: Map<string, string>;
   byNoExtLower: Map<string, string>;
   byBasenameLower: Map<string, string[]>;
@@ -231,14 +232,31 @@ async function parseNote(vaultRoot: string, relPath: string): Promise<ParsedNote
 }
 
 function buildIndex(notes: ParsedNote[]): NoteIndex {
+  const byPathExact = new Map<string, string>();
   const byPathLower = new Map<string, string>();
   const byNoExtLower = new Map<string, string>();
   const byBasenameLower = new Map<string, string[]>();
 
+  // Case-sensitive lookup always gets all notes — no collisions possible.
+  for (const note of notes) {
+    byPathExact.set(note.path, note.path);
+  }
+
+  // Case-insensitive lookups may have collisions (e.g. Foo/Bar.md vs foo/bar.md
+  // coexisting on APFS). On collision, keep the lexicographically smallest
+  // path so the resolver is deterministic across scans regardless of readdir
+  // order (which is filesystem-dependent and can vary).
+  const keepSmaller = (map: Map<string, string>, key: string, candidate: string) => {
+    const current = map.get(key);
+    if (current === undefined || candidate < current) {
+      map.set(key, candidate);
+    }
+  };
+
   for (const note of notes) {
     const pathLower = note.path.toLowerCase();
-    byPathLower.set(pathLower, note.path);
-    byNoExtLower.set(noExt(note.path), note.path);
+    keepSmaller(byPathLower, pathLower, note.path);
+    keepSmaller(byNoExtLower, noExt(note.path), note.path);
 
     const baseLower = basename(note.path, '.md').toLowerCase();
     const arr = byBasenameLower.get(baseLower) || [];
@@ -246,7 +264,13 @@ function buildIndex(notes: ParsedNote[]): NoteIndex {
     byBasenameLower.set(baseLower, arr);
   }
 
+  // Sort basename collision arrays so single-match disambiguation is stable.
+  for (const arr of byBasenameLower.values()) {
+    arr.sort();
+  }
+
   return {
+    byPathExact,
     byPathLower,
     byNoExtLower,
     byBasenameLower,
@@ -285,6 +309,12 @@ function resolveTargetPath(targetRaw: string, sourcePath: string, index: NoteInd
   }
 
   for (const candidate of candidates) {
+    // Case-sensitive first: a wikilink that matches the filename's actual
+    // casing should not be overridden by a case-insensitive collision.
+    const exact = index.byPathExact.get(candidate) || index.byPathExact.get(withMd(candidate));
+    if (exact) {
+      return exact;
+    }
     const lowered = candidate.toLowerCase();
     const fromPath = index.byPathLower.get(lowered);
     if (fromPath) {

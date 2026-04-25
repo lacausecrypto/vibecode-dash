@@ -20,49 +20,132 @@ export type CodexCcusageDailyRow = {
   [key: string]: unknown;
 };
 
-async function runJsonCommand(args: string[]): Promise<unknown> {
-  const timeoutMs = 45_000;
-  const proc = Bun.spawn(args, {
-    stdout: 'pipe',
-    stderr: 'pipe',
-    stdin: 'ignore',
-  });
+/**
+ * Hard cap on concurrent `npx ccusage` (or codex-ccusage) processes. Each
+ * one opens ~20 k FDs (every Claude JSONL session file) — without this cap,
+ * three or four parallel callers will saturate `kern.maxfiles` (122 880 on
+ * macOS) and trigger `ENFILE: posix_spawn '/bin/sh'` cascading errors.
+ *
+ * 2 concurrent is a safe ceiling: enough to overlap a daily call with a
+ * blocks call, far below the FD ceiling.
+ */
+const MAX_CONCURRENT_CCUSAGE = 2;
+let activeCcusageSpawns = 0;
+const ccusageQueue: Array<() => void> = [];
 
-  const timeout = setTimeout(() => {
-    try {
-      proc.kill('SIGTERM');
-    } catch {
-      // ignore kill failures
-    }
-  }, timeoutMs);
-
-  const hardKill = setTimeout(() => {
-    try {
-      proc.kill('SIGKILL');
-    } catch {
-      // ignore kill failures
-    }
-  }, timeoutMs + 3_000);
-
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  clearTimeout(timeout);
-  clearTimeout(hardKill);
-
-  if (code !== 0) {
-    const stderrMessage = stderr.trim();
-    throw new Error(stderrMessage || `Command failed or timed out: ${args.join(' ')}`);
+function acquireCcusageSlot(): Promise<() => void> {
+  if (activeCcusageSpawns < MAX_CONCURRENT_CCUSAGE) {
+    activeCcusageSpawns += 1;
+    return Promise.resolve(releaseSlot);
   }
+  return new Promise<() => void>((resolve) => {
+    ccusageQueue.push(() => {
+      activeCcusageSpawns += 1;
+      resolve(releaseSlot);
+    });
+  });
+}
 
+function releaseSlot(): void {
+  activeCcusageSpawns -= 1;
+  const next = ccusageQueue.shift();
+  if (next) next();
+}
+
+async function runJsonCommand(args: string[]): Promise<unknown> {
+  const release = await acquireCcusageSlot();
   try {
-    return JSON.parse(stdout);
-  } catch {
-    throw new Error(`Invalid JSON from command: ${args.join(' ')}`);
+    const timeoutMs = 45_000;
+    const proc = Bun.spawn(args, {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      stdin: 'ignore',
+    });
+
+    const timeout = setTimeout(() => {
+      try {
+        proc.kill('SIGTERM');
+      } catch {
+        // ignore kill failures
+      }
+    }, timeoutMs);
+
+    const hardKill = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        // ignore kill failures
+      }
+    }, timeoutMs + 3_000);
+
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    clearTimeout(timeout);
+    clearTimeout(hardKill);
+
+    if (code !== 0) {
+      const stderrMessage = stderr.trim();
+      console.warn(
+        `[ccusage] exit=${code} cmd=${args.join(' ')}\n  stderr=${stderrMessage.slice(0, 500)}\n  stdout=${stdout.slice(0, 200)}`,
+      );
+      throw new Error(stderrMessage || `Command failed or timed out: ${args.join(' ')}`);
+    }
+
+    try {
+      return JSON.parse(stdout);
+    } catch {
+      throw new Error(`Invalid JSON from command: ${args.join(' ')}`);
+    }
+  } finally {
+    release();
   }
 }
+
+/**
+ * Keyed cache + in-flight dedup wrapper around runJsonCommand.
+ *
+ * Why every ccusage helper goes through this:
+ *   - same arg-list returns same data within `ttlMs` → no need to spawn
+ *   - concurrent callers share one promise → never more than 1 spawn per key
+ *   - failures aren't cached (next call retries)
+ *
+ * Cache key is the joined arg list: `daily --since 20260101` and
+ * `daily --since 20260102` are different keys, as expected.
+ */
+type CacheEntry = { at: number; value: unknown };
+const ccCache = new Map<string, CacheEntry>();
+const ccInflight = new Map<string, Promise<unknown>>();
+
+async function cachedJsonCommand(args: string[], ttlMs: number): Promise<unknown> {
+  const key = args.join('\0');
+  const now = Date.now();
+  const hit = ccCache.get(key);
+  if (hit && now - hit.at < ttlMs) {
+    return hit.value;
+  }
+  const ongoing = ccInflight.get(key);
+  if (ongoing) return ongoing;
+
+  const promise = runJsonCommand(args)
+    .then((value) => {
+      ccCache.set(key, { at: Date.now(), value });
+      return value;
+    })
+    .finally(() => {
+      ccInflight.delete(key);
+    });
+  ccInflight.set(key, promise);
+  return promise;
+}
+
+// TTLs chosen so the cached value is "fresh enough" without re-spawning:
+//   - daily/session: 60 s — covers UI auto-refresh + dashboard reload
+//   - monthly: 5 min — month-level data barely moves intraday
+const CCUSAGE_DAILY_TTL_MS = 60_000;
+const CCUSAGE_MONTHLY_TTL_MS = 5 * 60_000;
 
 export async function ccusageDaily(since?: string, until?: string): Promise<CcusageDailyRow[]> {
   const args = ['npx', 'ccusage@latest', 'daily', '--json'];
@@ -73,7 +156,7 @@ export async function ccusageDaily(since?: string, until?: string): Promise<Ccus
     args.push('--until', until);
   }
 
-  const data = await runJsonCommand(args);
+  const data = await cachedJsonCommand(args, CCUSAGE_DAILY_TTL_MS);
   if (Array.isArray(data)) {
     return data as CcusageDailyRow[];
   }
@@ -86,7 +169,7 @@ export async function ccusageDaily(since?: string, until?: string): Promise<Ccus
 }
 
 export async function ccusageMonthly(): Promise<unknown> {
-  return runJsonCommand(['npx', 'ccusage@latest', 'monthly', '--json']);
+  return cachedJsonCommand(['npx', 'ccusage@latest', 'monthly', '--json'], CCUSAGE_MONTHLY_TTL_MS);
 }
 
 export async function codexCcusageDaily(
@@ -101,7 +184,7 @@ export async function codexCcusageDaily(
     args.push('--until', until);
   }
 
-  const data = await runJsonCommand(args);
+  const data = await cachedJsonCommand(args, CCUSAGE_DAILY_TTL_MS);
   if (Array.isArray(data)) {
     return data as CodexCcusageDailyRow[];
   }
@@ -117,7 +200,10 @@ export async function codexCcusageDaily(
 }
 
 export async function codexCcusageMonthly(): Promise<unknown> {
-  return runJsonCommand(['npx', '@ccusage/codex@latest', 'monthly', '--json']);
+  return cachedJsonCommand(
+    ['npx', '@ccusage/codex@latest', 'monthly', '--json'],
+    CCUSAGE_MONTHLY_TTL_MS,
+  );
 }
 
 export async function codexCcusageSession(since?: string, until?: string): Promise<unknown> {
@@ -128,5 +214,5 @@ export async function codexCcusageSession(since?: string, until?: string): Promi
   if (until) {
     args.push('--until', until);
   }
-  return runJsonCommand(args);
+  return cachedJsonCommand(args, CCUSAGE_DAILY_TTL_MS);
 }

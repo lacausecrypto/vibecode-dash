@@ -12,6 +12,7 @@ import {
 } from 'recharts';
 import { Heatmap } from '../components/Heatmap';
 import { ProjectsUsageLLM } from '../components/ProjectsUsageLLM';
+import { Segmented } from '../components/ui';
 import { apiGet } from '../lib/api';
 import { type Locale, dateLocale, numberLocale, useTranslation } from '../lib/i18n';
 import { type BillingHistory, computeBillingCost } from '../lib/pricing';
@@ -24,14 +25,19 @@ type CombinedDailyRow = {
   claudeCacheReadTokens: number;
   claudeTokens: number;
   claudeCostUsd: number;
+  // Subscription cost (USD) for this day = (daily sub rate in EUR) / usdToEur.
+  // Flat per-day while a plan is active. Optional on older clients/cached data.
+  claudeSubCostUsd?: number;
   codexInputTokens: number;
   codexCachedInputTokens: number;
   codexOutputTokens: number;
   codexReasoningOutputTokens: number;
   codexTokens: number;
   codexCostUsd: number;
+  codexSubCostUsd?: number;
   totalTokens: number;
   totalCostUsd: number;
+  totalSubCostUsd?: number;
 };
 
 type CombinedDailyResponse = {
@@ -170,14 +176,32 @@ type CodexToolUsageResponse = {
   } | null;
 };
 
+type RateLimitBar = { usedPercent: number; windowMinutes: number; resetsAt: number } | null;
+
 type CodexRateLimitsPayload = {
   rateLimits: {
-    primary: { usedPercent: number; windowMinutes: number; resetsAt: number } | null;
-    secondary: { usedPercent: number; windowMinutes: number; resetsAt: number } | null;
+    primary: RateLimitBar;
+    secondary: RateLimitBar;
     planType: string | null;
     observedAt: number;
   } | null;
+  // `live_oauth` = fresh from chatgpt.com/backend-api/wham/usage.
+  // `jsonl_fallback` = last value observed inside a Codex session transcript
+  // (stale by definition if the user hasn't run Codex recently).
+  source?: 'live_oauth' | 'jsonl_fallback';
+  liveCached?: boolean;
+  liveError?: string | null;
   meta: CodexUsageMeta;
+};
+
+type ClaudeRateLimitsPayload = {
+  rateLimits: {
+    primary: RateLimitBar;
+    secondary: RateLimitBar;
+    tertiary: RateLimitBar;
+    planType: string | null;
+    observedAt: number;
+  } | null;
 };
 
 type ProjectRowLike = {
@@ -266,7 +290,10 @@ function daysAgo(days: number): Date {
 }
 
 function queryRange(range: TimeRange): { fromIso: string; fromCompact: string } {
-  const fromDate = range === '30d' ? daysAgo(30) : range === '90d' ? daysAgo(90) : daysAgo(365);
+  // 'all' = 5 years back, same convention as ProjectsUsageLLM.periodToDays,
+  // which comfortably covers Claude history since July 2025 and anything
+  // earlier the user might accumulate.
+  const fromDate = range === '30d' ? daysAgo(30) : range === '90d' ? daysAgo(90) : daysAgo(5 * 365);
   return {
     fromIso: isoDateFromDate(fromDate),
     fromCompact: yyyymmddFromDate(fromDate),
@@ -374,6 +401,8 @@ export default function UsageRoute() {
   const [codexTools, setCodexTools] = useState<ToolUsageRow[]>([]);
   const [codexRateLimits, setCodexRateLimits] =
     useState<CodexRateLimitsPayload['rateLimits']>(null);
+  const [claudeRateLimits, setClaudeRateLimits] =
+    useState<ClaudeRateLimitsPayload['rateLimits']>(null);
   const [codexJsonlMeta, setCodexJsonlMeta] = useState<CodexUsageMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toolUsageError, setToolUsageError] = useState<string | null>(null);
@@ -507,6 +536,27 @@ export default function UsageRoute() {
       cancelled = true;
     };
   }, [range]);
+
+  // Claude rate-limits: derived from ccusage blocks (5h billing window). Not in
+  // the main Promise.all above because the endpoint shells out to `npx ccusage`
+  // which is much slower than the JSONL-backed routes, and we don't want it
+  // blocking the initial render.
+  useEffect(() => {
+    if (analyticsProvider !== 'claude') {
+      return;
+    }
+    let cancelled = false;
+    apiGet<ClaudeRateLimitsPayload>('/api/usage/claude/rate-limits')
+      .then((data) => {
+        if (!cancelled) setClaudeRateLimits(data.rateLimits || null);
+      })
+      .catch(() => {
+        if (!cancelled) setClaudeRateLimits(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [analyticsProvider]);
 
   useEffect(() => {
     let cancelled = false;
@@ -649,12 +699,28 @@ export default function UsageRoute() {
   const chartData = useMemo(() => {
     const rows = [...dailyCombined]
       .map((row) => {
-        const claudeActive = Number(row.claudeTokens || 0);
-        const claudeCache =
-          Number(row.claudeCacheCreateTokens || 0) + Number(row.claudeCacheReadTokens || 0);
-        const codexActive = Number(row.codexTokens || 0);
-        const codexCache = Number(row.codexCachedInputTokens || 0);
+        // Token conventions (critical — fixes previous double-count + label drift):
+        //   active = tokens computed fresh (billed at full rate, never from cache).
+        //   cache  = tokens read/written via the prompt cache.
+        //   all    = active + cache (no overlap).
+        // Claude JSONL keeps input and cache_read separate; Codex JSONL rolls
+        // cached_input_tokens INTO input_tokens, so we subtract to reach the
+        // fresh-only figure. Reasoning output is fresh work → counted in active.
+        const claudeIn = Number(row.claudeInputTokens || 0);
+        const claudeOut = Number(row.claudeOutputTokens || 0);
+        const claudeCacheCreate = Number(row.claudeCacheCreateTokens || 0);
+        const claudeCacheRead = Number(row.claudeCacheReadTokens || 0);
+        const claudeActive = claudeIn + claudeOut;
+        const claudeCache = claudeCacheCreate + claudeCacheRead;
         const claudeAll = claudeActive + claudeCache;
+
+        const codexInTotal = Number(row.codexInputTokens || 0);
+        const codexCached = Number(row.codexCachedInputTokens || 0);
+        const codexOut = Number(row.codexOutputTokens || 0);
+        const codexReasoning = Number(row.codexReasoningOutputTokens || 0);
+        const codexFreshIn = Math.max(0, codexInTotal - codexCached);
+        const codexActive = codexFreshIn + codexOut + codexReasoning;
+        const codexCache = codexCached;
         const codexAll = codexActive + codexCache;
 
         return {
@@ -665,14 +731,14 @@ export default function UsageRoute() {
           codexActiveTokens: codexActive,
           codexCacheTokens: codexCache,
           codexAllTokens: codexAll,
-          totalActiveTokens: Number(row.totalTokens || 0),
+          totalActiveTokens: claudeActive + codexActive,
           totalAllTokens: claudeAll + codexAll,
           claudeSelectedTokens: tokenLens === 'all' ? claudeAll : claudeActive,
           codexSelectedTokens: tokenLens === 'all' ? codexAll : codexActive,
           totalSelectedTokens: 0,
-          claudeCost: Number(row.claudeCostUsd || 0),
-          codexCost: Number(row.codexCostUsd || 0),
-          totalCost: Number(row.totalCostUsd || 0),
+          claudeCost: Number(row.claudeSubCostUsd ?? row.claudeCostUsd ?? 0),
+          codexCost: Number(row.codexSubCostUsd ?? row.codexCostUsd ?? 0),
+          totalCost: Number(row.totalSubCostUsd ?? row.totalCostUsd ?? 0),
         } satisfies ChartRow;
       })
       .map((row) => ({
@@ -998,6 +1064,18 @@ export default function UsageRoute() {
           <h2 className="section-title">{t('usage.title')}</h2>
           <div className="section-meta">{t('usage.headerMeta')}</div>
         </div>
+        {/* Page-level range filter: drives the chart + Claude/Codex provider
+            cards + MetricCards below. EconomyCard and ProjectsUsageLLM keep
+            their own all-time / period selectors on purpose. */}
+        <Segmented<TimeRange>
+          value={range}
+          options={[
+            { value: '30d', label: t('common.daysAgo', { n: 30 }) },
+            { value: '90d', label: t('common.daysAgo', { n: 90 }) },
+            { value: 'all', label: t('common.allTime') },
+          ]}
+          onChange={setRange}
+        />
       </div>
 
       {error ? (
@@ -1328,14 +1406,16 @@ export default function UsageRoute() {
             {analyticsProvider === 'codex' && codexJsonlMeta ? (
               <div className="text-right text-xs text-slate-500">
                 <div>
-                  {t('usage.analytics.filesLines', {
-                    files: codexJsonlMeta.filesScanned,
-                    lines: numberLabel(codexJsonlMeta.linesParsed),
-                  })}
+                  {codexJsonlMeta.filesScanned >= 0
+                    ? t('usage.analytics.filesLines', {
+                        files: codexJsonlMeta.filesScanned,
+                        lines: numberLabel(codexJsonlMeta.linesParsed),
+                      })
+                    : t('usage.analytics.dbAggregated')}
                 </div>
                 <div>
-                  {numberLabel(codexJsonlMeta.turns)} {t('usage.metricLines.userPrompts')} ·{' '}
-                  {codexJsonlMeta.sessions} sessions
+                  {numberLabel(codexJsonlMeta.turns ?? 0)} {t('usage.metricLines.userPrompts')} ·{' '}
+                  {numberLabel(codexJsonlMeta.sessions ?? 0)} sessions
                 </div>
               </div>
             ) : null}
@@ -1348,6 +1428,7 @@ export default function UsageRoute() {
             byModel={byModel}
             hourly={hourly}
             toolUsage={toolUsage}
+            rateLimits={claudeRateLimits}
             selectedProjectRef={selectedProjectRef}
             setSelectedProjectRef={setSelectedProjectRef}
             selectedProject={selectedProject}
@@ -1958,6 +2039,7 @@ function ClaudeAnalytics({
   byModel,
   hourly,
   toolUsage,
+  rateLimits,
   selectedProjectRef,
   setSelectedProjectRef,
   selectedProject,
@@ -1968,6 +2050,7 @@ function ClaudeAnalytics({
   byModel: ModelUsageRow[];
   hourly: HourDistributionRow[];
   toolUsage: ToolUsageRow[];
+  rateLimits: ClaudeRateLimitsPayload['rateLimits'];
   selectedProjectRef: string;
   setSelectedProjectRef: (value: string) => void;
   selectedProject: ProjectUsageRow | null;
@@ -2031,6 +2114,32 @@ function ClaudeAnalytics({
           { label: 'Output/reply', value: numberLabel(avgOutput), tone: 'amber' },
         ]}
       />
+
+      {rateLimits && (rateLimits.primary || rateLimits.secondary || rateLimits.tertiary) ? (
+        <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+          <RateLimitRow
+            label={t('usage.metricLines.limit5h')}
+            rate={rateLimits.primary}
+            planType={rateLimits.planType || null}
+            observedAt={rateLimits.observedAt || null}
+            tone="cyan"
+          />
+          <RateLimitRow
+            label={t('usage.metricLines.limit7d')}
+            rate={rateLimits.secondary}
+            planType={rateLimits.planType || null}
+            observedAt={rateLimits.observedAt || null}
+            tone="amber"
+          />
+          <RateLimitRow
+            label={t('usage.metricLines.limit7dSonnet')}
+            rate={rateLimits.tertiary}
+            planType={rateLimits.planType || null}
+            observedAt={rateLimits.observedAt || null}
+            tone="cyan"
+          />
+        </div>
+      ) : null}
 
       <HourSparkline
         data={hourly.map((h) => ({ hour: h.hour, value: h.tokens }))}
@@ -2130,7 +2239,13 @@ function CodexAnalytics({
     },
     { tokens: 0, turns: 0, sessions: 0, input: 0, cached: 0, reasoning: 0 },
   );
-  const cacheRatio = totals.input > 0 ? (totals.cached / totals.input) * 100 : 0;
+  // cache hit ratio = cached / total input seen (inputNet + cached).
+  // `totals.input` stores inputNet (raw − cached) from the Codex parser, so
+  // the denominator must add `cached` back to reconstruct the raw input.
+  // Previously used `cached / inputNet`, which could exceed 100% (observed
+  // 2193.8% when the vast majority of tokens were cache hits).
+  const cacheDenom = totals.input + totals.cached;
+  const cacheRatio = cacheDenom > 0 ? (totals.cached / cacheDenom) * 100 : 0;
 
   const models = byModel.slice(0, 6).map((row) => ({
     model: row.model,
@@ -2289,30 +2404,65 @@ function RateLimitRow({
     ? new Date(rate.resetsAt * 1000).toLocaleString(dateLocale(currentLocale()))
     : 'n/a';
 
+  // Staleness detection: rate limits live only in CLI transcript events, so
+  // the dashboard only knows the value captured at the last token_count.
+  // Two cases to surface:
+  //  - `expired`: the window this value describes has reset since observation
+  //    → displayed % is no longer meaningful, real usage may be much lower
+  //    or different. Strongest signal to ignore the bar.
+  //  - `aged`: observation older than 1h but window hasn't reset yet
+  //    → value is directionally correct but may have grown since.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const windowReset = rate.resetsAt > 0 && nowSec >= rate.resetsAt;
+  const agedSec = observedAt ? nowSec - observedAt : 0;
+  const aged = !windowReset && agedSec > 3600;
+  const observedLabel = observedAt
+    ? new Date(observedAt * 1000).toLocaleString(dateLocale(currentLocale()))
+    : 'n/a';
+
   return (
     <div
       className={`rounded-[var(--radius)] border ${accent.border} bg-[var(--surface-1)] px-3 py-2`}
-      title={
-        observedAt
-          ? new Date(observedAt * 1000).toLocaleString(dateLocale(currentLocale()))
-          : undefined
-      }
+      title={observedAt ? `${t('usage.metricLines.limitObservedAt')} ${observedLabel}` : undefined}
     >
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
           {label}
         </span>
-        <span className={`num text-[16px] font-semibold ${accent.value}`}>
+        <span
+          className={`num text-[16px] font-semibold ${
+            windowReset ? 'text-[var(--text-faint)] line-through' : accent.value
+          }`}
+        >
           {rate.usedPercent.toFixed(1)}%
         </span>
       </div>
       <div className="mt-1.5 h-1.5 rounded bg-[var(--surface-2)]">
-        <div className={`h-1.5 rounded ${accent.bar}`} style={{ width: `${clamped}%` }} />
+        <div
+          className={`h-1.5 rounded ${windowReset ? 'bg-[var(--surface-2)]' : accent.bar}`}
+          style={{ width: `${clamped}%`, opacity: windowReset ? 0.3 : 1 }}
+        />
       </div>
-      <div className="mt-1 flex items-center justify-between text-[10.5px] text-[var(--text-dim)]">
+      <div className="mt-1 flex items-center justify-between gap-2 text-[10.5px] text-[var(--text-dim)]">
         <span>{planType || '—'}</span>
+        {windowReset ? (
+          <span className="text-[var(--warn)]">{t('usage.metricLines.limitWindowReset')}</span>
+        ) : aged ? (
+          <span className="text-[var(--text-mute)]">
+            {t('usage.metricLines.limitAged', {
+              ago: formatAge(agedSec),
+            })}
+          </span>
+        ) : null}
         <span className="truncate">reset · {resetsLabel}</span>
       </div>
     </div>
   );
+}
+
+function formatAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
 }

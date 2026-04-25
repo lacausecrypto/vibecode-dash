@@ -3,6 +3,7 @@ import { registerAgentRoutes } from './agent';
 import { registerGithubRoutes } from './github';
 import { registerHealthRoutes } from './health';
 import { registerObsidianRoutes } from './obsidian';
+import { registerPresenceRoutes } from './presence';
 import { registerProjectRoutes } from './projects';
 import { registerRadarRoutes } from './radar';
 import { registerSettingsRoutes } from './settings';
@@ -17,4 +18,5 @@ export function registerRoutes(app: Hono): void {
   registerUsageRoutes(app);
   registerAgentRoutes(app);
   registerRadarRoutes(app);
+  registerPresenceRoutes(app);
 }

@@ -2,7 +2,9 @@ import type { Database } from 'bun:sqlite';
 import type { Hono } from 'hono';
 import { expandHomePath, loadSettings } from '../config';
 import { getDb } from '../db';
-import { type DailyTokenRow, computeProjectAccrual } from '../lib/billing';
+import { type DailyTokenRow, computeProjectAccrual, dailyRateOnDate } from '../lib/billing';
+import { rateLimit } from '../lib/rateLimit';
+import { type OauthUsageBar, getOauthUsage } from '../wrappers/anthropicOauth';
 import {
   type CcusageDailyRow,
   type CodexCcusageDailyRow,
@@ -13,6 +15,7 @@ import {
   codexCcusageSession,
 } from '../wrappers/ccusage';
 import { getCodexUsageSnapshot } from '../wrappers/codexJsonlParser';
+import { getCodexLiveRateLimits } from '../wrappers/codexOauth';
 import { type KnownProject, getClaudeUsageSnapshot } from '../wrappers/jsonlParser';
 
 // Previous caps (64 files × 650 lines) dropped >99% of events for large projects.
@@ -52,17 +55,26 @@ type CombinedDailyRow = {
   claudeCacheReadTokens: number;
   claudeTokens: number;
   claudeCostUsd: number;
+  claudeSubCostUsd: number;
   codexInputTokens: number;
   codexCachedInputTokens: number;
   codexOutputTokens: number;
   codexReasoningOutputTokens: number;
   codexTokens: number;
   codexCostUsd: number;
+  codexSubCostUsd: number;
   totalTokens: number;
   totalCostUsd: number;
+  totalSubCostUsd: number;
 };
 
 const codexSyncInflight = new Map<string, Promise<void>>();
+// When a codex sync fails (npx codex-ccusage offline / broken / network),
+// suppress re-tries until this timestamp to avoid hammering the CLI on every
+// page load. 60s is long enough to debounce but short enough that a user who
+// fixes the issue doesn't wait forever.
+const codexSyncCooldownUntil = new Map<string, number>();
+const CODEX_SYNC_COOLDOWN_SECONDS = 60;
 
 function yyyymmdd(date: Date): string {
   const y = date.getUTCFullYear();
@@ -224,7 +236,10 @@ function upsertDailyRows(db: Database, rows: ClaudeDailyNormalizedRow[]): void {
       row.cacheRead,
       row.costUsd,
       '{}',
-      'claude-code',
+      // Aligned with usage_daily_by_project.source convention ('claude' not
+      // 'claude-code'). Stale 'claude-code' rows get overwritten on next sync
+      // via ON CONFLICT(date) DO UPDATE SET source = excluded.source.
+      'claude',
       syncedAt,
     );
   }
@@ -295,6 +310,84 @@ function loadCachedDailyRows(
   sql += ' ORDER BY date ASC LIMIT 400';
 
   return db.query(sql).all(...params) as ClaudeDailyNormalizedRow[];
+}
+
+/**
+ * Codex daily rows aggregated from `usage_daily_by_project` (the per-project
+ * source-of-truth refreshed by the JSONL watcher on every project scan).
+ *
+ * Replaces a previous read from `usage_codex_daily` which is populated by the
+ * external `npx @ccusage/codex daily --json` CLI. That CLI:
+ *   - buckets sessions using a different tz convention, shifting rows by
+ *     1 day vs what actually happened locally;
+ *   - occasionally drops dates entirely when no session ended cleanly;
+ *   - only runs on the codex sync cadence, so today is frequently missing.
+ *
+ * Per-project schema maps Codex's native token categories as:
+ *   input_tokens  = input_net (fresh input, already net of cached)
+ *   output_tokens = output + reasoning
+ *   cache_read    = cached_input
+ *   total_tokens  = sum of all of the above
+ * so we rebuild the normalized shape the rest of the pipeline expects.
+ */
+function loadCodexDailyFromPerProject(
+  db: Database,
+  fromIso?: string,
+  toIso?: string,
+): CodexDailyNormalizedRow[] {
+  const clauses: string[] = ["source = 'codex'"];
+  const params: Array<string | number> = [];
+  if (fromIso) {
+    clauses.push('date >= ?');
+    params.push(fromIso);
+  }
+  if (toIso) {
+    clauses.push('date <= ?');
+    params.push(toIso);
+  }
+  const rows = db
+    .query(
+      `SELECT date,
+              SUM(input_tokens) AS inputNet,
+              SUM(cache_read)   AS cachedInput,
+              SUM(output_tokens) AS outputPlusReasoning,
+              SUM(total_tokens) AS totalTokens,
+              SUM(cost_usd) AS costUsd,
+              MAX(synced_at) AS syncedAt
+       FROM usage_daily_by_project
+       WHERE ${clauses.join(' AND ')}
+       GROUP BY date
+       ORDER BY date ASC
+       LIMIT 500`,
+    )
+    .all(...params) as Array<{
+    date: string;
+    inputNet: number;
+    cachedInput: number;
+    outputPlusReasoning: number;
+    totalTokens: number;
+    costUsd: number;
+    syncedAt: number;
+  }>;
+
+  // Reconstruct the CodexDailyNormalizedRow shape. input_tokens is stored as
+  // input_net in per-project, but downstream consumers (client chart, exports)
+  // expect the "ccusage convention" where input_tokens INCLUDES cached_input.
+  // Re-add cached so the two representations stay interchangeable.
+  return rows.map((r) => ({
+    date: r.date,
+    inputTokens: Number(r.inputNet || 0) + Number(r.cachedInput || 0),
+    cachedInputTokens: Number(r.cachedInput || 0),
+    outputTokens: Number(r.outputPlusReasoning || 0),
+    // We stored output + reasoning together in output_tokens at ingest, so we
+    // can't split them back apart here. Surface reasoning=0 and keep the full
+    // work under outputTokens; the chart sums them anyway.
+    reasoningOutputTokens: 0,
+    totalTokens: Number(r.totalTokens || 0),
+    costUsd: Number(r.costUsd || 0),
+    models: {},
+    syncedAt: Number(r.syncedAt || 0),
+  }));
 }
 
 function loadCachedCodexDailyRows(
@@ -411,14 +504,22 @@ async function syncCodexDailyToDb(
 
 function scheduleCodexDailySync(db: Database, sinceIso: string, untilIso: string): void {
   const key = `${sinceIso}:${untilIso}`;
-  const existing = codexSyncInflight.get(key);
-  if (existing) {
+  if (codexSyncInflight.get(key)) {
+    return;
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  const cooldownUntil = codexSyncCooldownUntil.get(key) ?? 0;
+  if (nowSec < cooldownUntil) {
     return;
   }
 
   const promise = syncCodexDailyToDb(db, sinceIso, untilIso)
-    .then(() => {})
-    .catch(() => {})
+    .then(() => {
+      codexSyncCooldownUntil.delete(key);
+    })
+    .catch(() => {
+      codexSyncCooldownUntil.set(key, Math.floor(Date.now() / 1000) + CODEX_SYNC_COOLDOWN_SECONDS);
+    })
     .finally(() => {
       codexSyncInflight.delete(key);
     });
@@ -447,21 +548,29 @@ function combineDailyRows(
         claudeCacheReadTokens: 0,
         claudeTokens: 0,
         claudeCostUsd: 0,
+        claudeSubCostUsd: 0,
         codexInputTokens: 0,
         codexCachedInputTokens: 0,
         codexOutputTokens: 0,
         codexReasoningOutputTokens: 0,
         codexTokens: 0,
         codexCostUsd: 0,
+        codexSubCostUsd: 0,
         totalTokens: 0,
         totalCostUsd: 0,
+        totalSubCostUsd: 0,
       } satisfies CombinedDailyRow);
 
     existing.claudeInputTokens += row.inputTokens;
     existing.claudeOutputTokens += row.outputTokens;
     existing.claudeCacheCreateTokens += row.cacheCreate;
     existing.claudeCacheReadTokens += row.cacheRead;
-    existing.claudeTokens += row.inputTokens + row.outputTokens;
+    // Include cache tokens in the total so claudeTokens is comparable to
+    // codexTokens (which already contains input + output + reasoning +
+    // cached via row.totalTokens from usage_codex_daily). Previously
+    // claudeTokens omitted cache, making the daily-combined chart mix two
+    // different conventions.
+    existing.claudeTokens += row.inputTokens + row.outputTokens + row.cacheCreate + row.cacheRead;
     existing.claudeCostUsd += row.costUsd;
 
     existing.totalTokens = existing.claudeTokens + existing.codexTokens;
@@ -485,14 +594,17 @@ function combineDailyRows(
         claudeCacheReadTokens: 0,
         claudeTokens: 0,
         claudeCostUsd: 0,
+        claudeSubCostUsd: 0,
         codexInputTokens: 0,
         codexCachedInputTokens: 0,
         codexOutputTokens: 0,
         codexReasoningOutputTokens: 0,
         codexTokens: 0,
         codexCostUsd: 0,
+        codexSubCostUsd: 0,
         totalTokens: 0,
         totalCostUsd: 0,
+        totalSubCostUsd: 0,
       } satisfies CombinedDailyRow);
 
     existing.codexInputTokens += row.inputTokens;
@@ -597,7 +709,10 @@ export function registerUsageRoutes(app: Hono): void {
     const untilIso = isoDateFromTs(range.toTs);
 
     const claudeRows = loadCachedDailyRows(db, sinceIso, untilIso);
-    const codexRows = loadCachedCodexDailyRows(db, sinceIso, untilIso);
+    // Per-project table as source-of-truth for the daily-combined chart:
+    // always fresh (updated by the project scanner) and matches local-tz
+    // bucketing, unlike ccusage-codex which can lag 1 day or drop today.
+    const codexRows = loadCodexDailyFromPerProject(db, sinceIso, untilIso);
 
     let claudeWarning: string | null = null;
     let codexWarning: string | null = null;
@@ -630,6 +745,19 @@ export function registerUsageRoutes(app: Hono): void {
 
     const rows = combineDailyRows(claudeRows, codexRows);
 
+    // Overlay subscription cost per day. dailyRateOnDate returns EUR; chart
+    // axis is USD so we convert via usdToEur. When billingHistory has no
+    // charge covering a given date, the rate is 0 and the sub line dips.
+    const settings = await loadSettings();
+    const usdToEur = settings.subscriptions.usdToEur || 1;
+    for (const row of rows) {
+      const claudeEur = dailyRateOnDate(settings.billingHistory.claude, 'claude', row.date);
+      const codexEur = dailyRateOnDate(settings.billingHistory.codex, 'codex', row.date);
+      row.claudeSubCostUsd = claudeEur / usdToEur;
+      row.codexSubCostUsd = codexEur / usdToEur;
+      row.totalSubCostUsd = row.claudeSubCostUsd + row.codexSubCostUsd;
+    }
+
     return c.json({
       rows,
       warnings: {
@@ -639,7 +767,17 @@ export function registerUsageRoutes(app: Hono): void {
     });
   });
 
+  // Both sync endpoints shell out to npx ccusage — bound to 3 per minute to
+  // prevent button-mashing from stacking up concurrent CLI spawns.
+  const usageSyncRl = rateLimit(3, 60_000);
+
   app.post('/api/usage/sync', async (c) => {
+    const verdict = usageSyncRl.check('claude');
+    if (!verdict.ok) {
+      return c.json({ error: 'rate_limited', retryAfterMs: verdict.retryAfterMs }, 429, {
+        'retry-after': String(Math.ceil(verdict.retryAfterMs / 1000)),
+      });
+    }
     const body = await c.req.json().catch(() => ({}));
     const from = typeof body.from === 'string' ? body.from : undefined;
     const to = typeof body.to === 'string' ? body.to : undefined;
@@ -654,6 +792,12 @@ export function registerUsageRoutes(app: Hono): void {
   });
 
   app.post('/api/usage/codex/sync', async (c) => {
+    const verdict = usageSyncRl.check('codex');
+    if (!verdict.ok) {
+      return c.json({ error: 'rate_limited', retryAfterMs: verdict.retryAfterMs }, 429, {
+        'retry-after': String(Math.ceil(verdict.retryAfterMs / 1000)),
+      });
+    }
     const body = await c.req.json().catch(() => ({}));
     const range = parseRange(body.from, body.to, 90);
     const sinceIso = isoDateFromTs(range.fromTs);
@@ -705,7 +849,12 @@ export function registerUsageRoutes(app: Hono): void {
       const limit = Math.min(Number.parseInt(c.req.query('limit') || '80', 10), 500);
       const projectId = c.req.query('projectId');
       const project = c.req.query('project');
-      const source = c.req.query('source') === 'codex' ? 'codex' : 'claude';
+      // This endpoint returns Claude-shaped rows (inputTokens / cacheCreate /
+      // cacheRead / messageCount / etc.). A prior `source=codex` branch fell
+      // back to `getClaudeUsageSnapshot` on empty DB, returning Claude data
+      // labeled as Codex — silent corruption. For Codex use the dedicated
+      // `/api/usage/codex/by-project` endpoint instead.
+      const source = 'claude';
 
       const fromDate = isoDateFromTs(range.fromTs);
       const toDate = isoDateFromTs(range.toTs);
@@ -803,9 +952,18 @@ export function registerUsageRoutes(app: Hono): void {
       // active that day proportionally to their tokens. Projects created yesterday
       // only receive 1 day of accrual — NOT the full window's share.
       const settings = await loadSettings();
+      // Attribution weight = fresh tokens = input + output (cache excluded).
+      // `usage_daily_by_project` already normalises both providers: Claude's
+      // input_tokens excludes cache_read (billed separately), and Codex's
+      // input_tokens is stored as input_net (cached_input subtracted at
+      // ingest — see buildCodexDailyByProject, output already includes
+      // reasoning). So `input + output` is the apples-to-apples "fresh work"
+      // figure across providers. Using `total_tokens` here (as before)
+      // over-weighted projects with heavy cache_read, giving them a
+      // disproportionate share of the subscription.
       const dailyRaw = db
         .query(
-          'SELECT date, project_key AS projectKey, source, SUM(total_tokens) AS tokens FROM usage_daily_by_project WHERE source = ? AND date >= ? AND date <= ? GROUP BY date, project_key, source',
+          'SELECT date, project_key AS projectKey, source, SUM(input_tokens + output_tokens) AS tokens FROM usage_daily_by_project WHERE source = ? AND date >= ? AND date <= ? GROUP BY date, project_key, source',
         )
         .all(source, fromDate, toDate) as Array<{
         date: string;
@@ -1203,7 +1361,7 @@ export function registerUsageRoutes(app: Hono): void {
       const settings = await loadSettings();
       const dailyRaw = db
         .query(
-          "SELECT date, project_key AS projectKey, source, SUM(total_tokens) AS tokens FROM usage_daily_by_project WHERE source = 'codex' AND date >= ? AND date <= ? GROUP BY date, project_key, source",
+          "SELECT date, project_key AS projectKey, source, SUM(input_tokens + output_tokens) AS tokens FROM usage_daily_by_project WHERE source = 'codex' AND date >= ? AND date <= ? GROUP BY date, project_key, source",
         )
         .all(fromDate, toDate) as Array<{
         date: string;
@@ -1300,14 +1458,29 @@ export function registerUsageRoutes(app: Hono): void {
         };
       });
 
+      // Meta reflects the aggregated DB content, not a fresh JSONL scan.
+      // filesScanned/linesParsed are N/A on this path so we report -1 to
+      // signal "unavailable from this path" to the client; turns/sessions
+      // come from the already-aggregated rows so the header doesn't render
+      // NaN.
+      const metaTotals = rows.reduce(
+        (acc, r) => {
+          acc.turns += Number(r.turns || 0);
+          acc.sessions += Number(r.sessions || 0);
+          return acc;
+        },
+        { turns: 0, sessions: 0 },
+      );
       return c.json({
         rows: enriched,
         meta: {
           generatedAt: Math.floor(Date.now() / 1000),
           fromTs: range.fromTs,
           toTs: range.toTs,
-          filesScanned: 0,
-          linesParsed: 0,
+          filesScanned: -1,
+          linesParsed: -1,
+          turns: metaTotals.turns,
+          sessions: metaTotals.sessions,
           source: 'db_aggregated',
         },
       });
@@ -1414,12 +1587,82 @@ export function registerUsageRoutes(app: Hono): void {
     }
   });
 
+  // Claude rate-limits: real Anthropic quotas pulled from `/api/oauth/usage`
+  // (same endpoint the CLI `/status` panel uses) via the OAuth token in the
+  // macOS keychain. Three bars exposed: 5h session, 7d all-models, 7d Sonnet.
+  // Shape mirrors the Codex `rateLimits` convention so the UI reuses RateLimitRow.
+  app.get('/api/usage/claude/rate-limits', async (c) => {
+    try {
+      // `?force=1` (used by the manual refresh button) bypasses the TTL
+      // cache but still respects the 429 backoff window — we don't let the
+      // user tap Anthropic raw.
+      const force = c.req.query('force') === '1';
+      const usage = await getOauthUsage({ force });
+      if (!usage) {
+        return c.json({ rateLimits: null });
+      }
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const toBar = (bar: OauthUsageBar, windowMinutes: number) => {
+        if (!bar) {
+          return null;
+        }
+        const resetsAt = bar.resets_at ? Math.floor(new Date(bar.resets_at).getTime() / 1000) : 0;
+        return {
+          usedPercent: bar.utilization,
+          windowMinutes,
+          resetsAt,
+        };
+      };
+
+      const rateLimits = {
+        primary: toBar(usage.five_hour, 5 * 60),
+        secondary: toBar(usage.seven_day, 7 * 24 * 60),
+        tertiary: toBar(usage.seven_day_sonnet, 7 * 24 * 60),
+        planType: 'claude (oauth)',
+        observedAt: nowSec,
+      };
+      return c.json({ rateLimits });
+    } catch (error) {
+      console.warn('[claude/rate-limits] oauth usage failed', error);
+      return c.json({ rateLimits: null });
+    }
+  });
+
   app.get('/api/usage/codex/rate-limits', async (c) => {
     try {
       const db = getDb();
       const settings = await loadSettings();
       const range = parseRange(c.req.query('from'), c.req.query('to'), 30);
 
+      // Try the live OAuth endpoint first: gives real-time values even when
+      // the user hasn't run Codex today (JSONL snapshots are stale by
+      // definition until the next `token_count` event).
+      const force = c.req.query('force') === '1';
+      const live = await getCodexLiveRateLimits({ force });
+      if (live.value) {
+        // Minimal meta so UI doesn't crash on undefined fields. We skip the
+        // JSONL scan entirely on the live path — paying that cost would
+        // defeat the "fast live refresh" purpose.
+        const nowSec = Math.floor(Date.now() / 1000);
+        return c.json({
+          rateLimits: live.value,
+          source: 'live_oauth',
+          liveCached: live.cached,
+          meta: {
+            generatedAt: nowSec,
+            fromTs: range.fromTs,
+            toTs: range.toTs,
+            filesScanned: -1,
+            linesParsed: -1,
+            turns: 0,
+            sessions: 0,
+          },
+        });
+      }
+
+      // Fall back to JSONL-embedded rate_limits. Annotate the response so
+      // the client can surface the degraded mode.
       const snapshot = await getCodexUsageSnapshot({
         projectRoots: settings.paths.projectsRoots.map((root) => expandHomePath(root)),
         knownProjects: knownProjectsFromDb(db),
@@ -1430,6 +1673,8 @@ export function registerUsageRoutes(app: Hono): void {
 
       return c.json({
         rateLimits: snapshot.rateLimits,
+        source: 'jsonl_fallback',
+        liveError: live.error,
         meta: codexUsageMeta(snapshot),
       });
     } catch (error) {
