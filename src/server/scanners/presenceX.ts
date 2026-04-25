@@ -7,7 +7,7 @@ import {
   recordCost,
   updateDraftBody,
 } from '../lib/presence';
-import { classifyImageNeed, generateDraft, scoreCandidate } from '../lib/presenceDrafter';
+import { classifyImageNeed, generateDraft, scoreCandidatesBatch } from '../lib/presenceDrafter';
 import {
   type XTweet,
   buildTopicQuery,
@@ -38,6 +38,20 @@ const SCORE_THRESHOLD = 0.7; // X is costlier than Reddit, we raise the bar
 const MIN_TWEET_AGE_SEC = 120;
 const MAX_TWEET_AGE_SEC = 24 * 3600;
 const MAX_CANDIDATES_PER_SOURCE = 15;
+
+/**
+ * Pre-CLI engagement filter. Tweets that fail this floor are dropped before
+ * we spend a Haiku score call on them. Raised from `like ≥ 1 OR reply ≥ 1`
+ * after live timing showed ~50 % of candidates with 0-2 likes never crossed
+ * the 0.70 score bar — we were paying ~15 s of CLI per call to filter them
+ * via the model when an integer comparison kills them in microseconds.
+ *
+ * Conservative tier: keeps any tweet with mid-low engagement that suggests
+ * a real conversation (≥ 2 replies) or modest validation (≥ 3 likes). Pure
+ * 0-engagement throwaways and 1-like bot replies are dropped.
+ */
+const MIN_LIKES_FOR_SCORING = 3;
+const MIN_REPLIES_FOR_SCORING = 2;
 
 export type XScanOutcome = {
   source_id: string;
@@ -154,24 +168,43 @@ export async function scanXSource(
     if (age < MIN_TWEET_AGE_SEC || age > MAX_TWEET_AGE_SEC) return false;
     // skip retweets/replies even if the API didn't filter them for us
     if (t.referenced_tweets?.some((r) => r.type === 'retweeted')) return false;
-    // Engagement threshold is a coarse pre-filter (kills bots / 0-interaction
-    // throwaways). The real noise filter is the Claude scorer downstream — we
-    // intentionally let low-engagement tweets through when the topic is niche
-    // (Basic tier can't apply min_faves operator at the API level).
-    return t.public_metrics.like_count >= 1 || t.public_metrics.reply_count >= 1;
+    // Engagement floor — kills bots / 0-interaction throwaways before they
+    // burn a 15 s Haiku score call. Either real likes (validation signal)
+    // OR genuine reply conversation (engagement signal). The Claude scorer
+    // still does the heavy noise filtering for what gets through.
+    return (
+      t.public_metrics.like_count >= MIN_LIKES_FOR_SCORING ||
+      t.public_metrics.reply_count >= MIN_REPLIES_FOR_SCORING
+    );
   });
 
-  const candidates = fresh.slice(0, MAX_CANDIDATES_PER_SOURCE);
-
-  for (const tweet of candidates) {
+  // Dedup BEFORE scoring so duplicate tweets never enter the batch. This
+  // also keeps the cost ledger honest: a batch only counts the candidates
+  // it actually rated, not the ones already drafted from a previous run.
+  const candidates: { tweet: XTweet; candidate: ReturnType<typeof tweetToCandidate> }[] = [];
+  for (const tweet of fresh.slice(0, MAX_CANDIDATES_PER_SOURCE)) {
     if (rowExistsForTweet(db, tweet.id)) {
       outcome.skipped_duplicate += 1;
       continue;
     }
+    candidates.push({ tweet, candidate: tweetToCandidate(tweet) });
+  }
 
-    const candidate = tweetToCandidate(tweet);
-    const scored = await scoreCandidate(db, settings, candidate);
-    outcome.scored += 1;
+  // Stage 1 — batch scoring. One CLI call per chunk of SCORE_BATCH_SIZE
+  // candidates (8 by default). 6× wall-clock improvement vs sequential.
+  const scores = await scoreCandidatesBatch(
+    db,
+    settings,
+    candidates.map((c) => c.candidate),
+  );
+  outcome.scored = scores.length;
+
+  // Stage 2 — draft only the candidates that cleared the threshold. Still
+  // sequential here because Sonnet drafts are 16 s each and parallelizing
+  // would burst the subscription quota on max-tier scans (50+ candidates).
+  for (let i = 0; i < candidates.length; i++) {
+    const { tweet, candidate } = candidates[i];
+    const scored = scores[i];
     if (scored.score < SCORE_THRESHOLD) {
       outcome.skipped_low_score += 1;
       continue;

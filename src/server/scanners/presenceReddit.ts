@@ -6,7 +6,7 @@ import {
   markSourceScanned,
   updateDraftBody,
 } from '../lib/presence';
-import { classifyImageNeed, generateDraft, scoreCandidate } from '../lib/presenceDrafter';
+import { classifyImageNeed, generateDraft, scoreCandidatesBatch } from '../lib/presenceDrafter';
 import {
   type RedditPost,
   listSubredditHot,
@@ -162,25 +162,43 @@ export async function scanRedditSource(
     return true;
   });
 
-  const candidates = fresh.slice(0, MAX_CANDIDATES_PER_SOURCE);
-
-  for (const post of candidates) {
+  // Dedup BEFORE scoring so duplicate posts never enter the batch. Same
+  // pattern as the X scanner — keeps the ledger honest and lets the batch
+  // call rate only fresh candidates.
+  const candidates: {
+    post: RedditPost;
+    externalId: string;
+    candidate: ReturnType<typeof postToCandidate>;
+  }[] = [];
+  for (const post of fresh.slice(0, MAX_CANDIDATES_PER_SOURCE)) {
     const externalId = `t3_${post.id}`;
     if (rowExistsForThread(db, 'reddit', externalId)) {
       outcome.skipped_duplicate += 1;
       continue;
     }
+    candidates.push({ post, externalId, candidate: postToCandidate(post) });
+  }
 
-    // Stage 1
-    const candidate = postToCandidate(post);
-    const scored = await scoreCandidate(db, settings, candidate);
-    outcome.scored += 1;
+  // Stage 1 — batch scoring. ~6× faster than sequential single-candidate
+  // calls (one cold start + one shared context block instead of N).
+  const scores = await scoreCandidatesBatch(
+    db,
+    settings,
+    candidates.map((c) => c.candidate),
+  );
+  outcome.scored = scores.length;
+
+  // Stage 2 — draft each candidate that cleared the threshold. Sequential
+  // because Sonnet drafts are heavier and we don't want to burst quota on
+  // a 20-source scheduled scan.
+  for (let i = 0; i < candidates.length; i++) {
+    const { post, externalId, candidate } = candidates[i];
+    const scored = scores[i];
     if (scored.score < SCORE_THRESHOLD) {
       outcome.skipped_low_score += 1;
       continue;
     }
 
-    // Stage 2
     let draft: Awaited<ReturnType<typeof generateDraft>>;
     try {
       draft = await generateDraft(db, settings, candidate, scored.score);

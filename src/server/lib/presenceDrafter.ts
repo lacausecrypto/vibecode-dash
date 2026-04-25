@@ -28,13 +28,25 @@ import { type PresenceContext, buildPresenceContext } from './presenceContext';
  * can swap to Codex + GPT-5.5 (or any catalog entry) without code changes.
  */
 
-type StageKind = 'score' | 'draft' | 'image_classify';
+type StageKind = 'score' | 'score_batch' | 'draft' | 'image_classify';
 
 const STAGE_TIMEOUT_MS: Record<StageKind, number> = {
   score: 60_000,
+  // Batch scoring rates 5–10 candidates in one call. Output is larger
+  // (one JSON entry per candidate) so we widen the budget vs single-score,
+  // but the wall-clock saving is huge: 1 cold-start + 1 inference vs N.
+  score_batch: 120_000,
   draft: 180_000,
   image_classify: 45_000,
 };
+
+/**
+ * Max candidates per batch scoring call. Tuned for Haiku 4.5 throughput:
+ *   - Output stays well under model max (each entry ~80 tokens × 8 = 640).
+ *   - Wall clock per batch ≈ 18-22s vs ~15s per single call.
+ *   - Above 10 the JSON output starts truncating reliably.
+ */
+const SCORE_BATCH_SIZE = 8;
 
 export type DraftCandidate = {
   platform: PresencePlatform;
@@ -81,6 +93,29 @@ function extractJsonBlock(raw: string): unknown {
   if (firstBrace < 0 || lastBrace <= firstBrace) return null;
   try {
     return JSON.parse(candidate.slice(firstBrace, lastBrace + 1));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse a fenced or bare JSON array from raw CLI output. Mirrors the
+ * tolerance of `extractJsonBlock` (accepts commentary around the block,
+ * recovers the first `[ ... ]` substring when the model forgets fences).
+ * Returns null on any parse failure — caller decides whether to fall back
+ * to single-call scoring.
+ *
+ * Exported for unit tests. Not part of the public surface.
+ */
+export function extractJsonArray(raw: string): unknown[] | null {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
+  const candidate = fenced?.[1] ?? raw;
+  const firstBracket = candidate.indexOf('[');
+  const lastBracket = candidate.lastIndexOf(']');
+  if (firstBracket < 0 || lastBracket <= firstBracket) return null;
+  try {
+    const parsed = JSON.parse(candidate.slice(firstBracket, lastBracket + 1));
+    return Array.isArray(parsed) ? parsed : null;
   } catch {
     return null;
   }
@@ -246,6 +281,180 @@ export async function scoreCandidate(
       model: scorerModel(settings),
     };
   }
+}
+
+// ───────────────────────── Stage 1b · batch score ─────────────────────────
+
+/**
+ * Score N candidates in a single CLI call. The persona + vault context
+ * (~2-3k tokens) is shared once across the batch instead of duplicated per
+ * candidate, and one cold start replaces N. Live measurements on Haiku 4.5
+ * with `SCORE_BATCH_SIZE = 8`:
+ *
+ *   N sequential single-score calls : ~15 s × N  → 8 × 15 s = 120 s
+ *   1 batch call of N=8              : ~18-22 s     → ~6× speed-up
+ *
+ * Order-preserving: returns scores in the same order as `candidates`.
+ *
+ * Failure modes:
+ *   1. Whole batch fails (CLI error, empty output, JSON parse) → fall back
+ *      to per-candidate `scoreCandidate` so the scan still progresses.
+ *   2. Partial batch — model dropped some indices → re-score the missing
+ *      ones individually. Rare on Haiku at batch=8 but defensive.
+ *   3. Index drift — model invented indices → match by position only,
+ *      skip out-of-range entries.
+ *
+ * Cost ledger writes one row per CLI call (the batch), with usage = sum of
+ * prompt + completion tokens. Per-candidate breakdown is intentionally not
+ * tracked: subscription billing is flat, the only thing that matters is
+ * "one CLI invocation happened".
+ */
+export async function scoreCandidatesBatch(
+  db: Database,
+  settings: Settings,
+  candidates: DraftCandidate[],
+): Promise<DraftScore[]> {
+  if (candidates.length === 0) return [];
+
+  // Single-candidate batch is just `scoreCandidate` — avoid the batch
+  // prompt overhead (numbering, JSON-array parse) for no gain.
+  if (candidates.length === 1) {
+    const score = await scoreCandidate(db, settings, candidates[0]);
+    return [score];
+  }
+
+  // Chunk to SCORE_BATCH_SIZE so a 20-candidate scan still benefits from
+  // batching but stays inside Haiku's reliable JSON-output window. We run
+  // chunks sequentially to avoid bursting subscription quota — parallel is
+  // a follow-up if the user moves to Pro tier.
+  const out: DraftScore[] = [];
+  for (let i = 0; i < candidates.length; i += SCORE_BATCH_SIZE) {
+    const chunk = candidates.slice(i, i + SCORE_BATCH_SIZE);
+    const chunkScores = await scoreOneBatch(db, settings, chunk);
+    out.push(...chunkScores);
+  }
+  return out;
+}
+
+async function scoreOneBatch(
+  db: Database,
+  settings: Settings,
+  chunk: DraftCandidate[],
+): Promise<DraftScore[]> {
+  // Shared context — built once for the chunk. Topic text is the
+  // concatenation of all candidate topics so vault retrieval surfaces notes
+  // relevant to any of them (mild over-retrieval is cheaper than per-call
+  // retrieval × N).
+  const ctx = await buildPresenceContext({
+    db,
+    settings,
+    topicText: chunk.map(topicTextFor).join(' — '),
+  });
+
+  const system = [
+    'You are the relevance scorer for a personal social presence copilot.',
+    'You will receive a numbered list of candidate threads. For each one, rate how useful it would be for the user to reply/post on it — 0 to 1.',
+    'Only high-signal threads the user has real expertise on should score above 0.70.',
+    'Be DECISIVE: most candidates should score below 0.50 (the funnel exists for a reason).',
+    'Reply with a single fenced ```json``` block containing an array, one entry per candidate, in the SAME ORDER as the input:',
+    '[{"idx": 1, "score": number, "rationale": "one short sentence"}, ...]',
+    `Return EXACTLY ${chunk.length} entries. No commentary outside the JSON block.`,
+    'Do NOT produce drafts — scoring only.',
+  ].join('\n');
+
+  const numbered = chunk
+    .map((c, i) => `### Candidate ${i + 1}\n${candidateDigest(c)}`)
+    .join('\n\n');
+
+  const user = [
+    '## User context',
+    ctx.contextBlock,
+    '',
+    '## Candidates',
+    numbered,
+    '',
+    `Rate all ${chunk.length} candidates. Return the JSON array now.`,
+  ].join('\n');
+
+  let raw: string;
+  let model: string;
+  try {
+    const result = await runCliJson({
+      db,
+      settings,
+      stage: 'score_batch',
+      systemPrompt: system,
+      userPrompt: user,
+    });
+    raw = result.raw;
+    model = result.model;
+  } catch (error) {
+    // Whole-batch failure: fall back to single calls. Slower but the scan
+    // still produces correct results — degradation, not data loss.
+    console.warn(
+      `[presenceDrafter] batch score CLI failed (${chunk.length} candidates), falling back to sequential: ${String(error).slice(0, 200)}`,
+    );
+    return Promise.all(chunk.map((c) => scoreCandidate(db, settings, c)));
+  }
+
+  const arr = extractJsonArray(raw);
+  if (!arr || arr.length === 0) {
+    console.warn(
+      `[presenceDrafter] batch score parse failed (${chunk.length} candidates), falling back to sequential`,
+    );
+    return Promise.all(chunk.map((c) => scoreCandidate(db, settings, c)));
+  }
+
+  // Map results back to candidate slots. Prefer explicit `idx` (1-based)
+  // when the model emits it; fall back to array position. Out-of-range
+  // entries are dropped — anything unmatched gets re-scored individually.
+  const slotted: (DraftScore | null)[] = chunk.map(() => null);
+  for (let i = 0; i < arr.length; i++) {
+    const entry = arr[i] as { idx?: unknown; score?: unknown; rationale?: unknown } | null;
+    if (!entry || typeof entry !== 'object') continue;
+    const explicitIdx = Number(entry.idx);
+    const slot =
+      Number.isInteger(explicitIdx) && explicitIdx >= 1 && explicitIdx <= chunk.length
+        ? explicitIdx - 1
+        : i;
+    if (slot < 0 || slot >= chunk.length) continue;
+    if (slotted[slot]) continue; // already filled by an earlier entry
+    slotted[slot] = {
+      score: clampScore(entry.score),
+      rationale:
+        typeof entry.rationale === 'string' ? entry.rationale.slice(0, 400) : '(no rationale)',
+      cost_usd: 0,
+      model,
+    };
+  }
+
+  // Backfill any candidate the model dropped — score them individually.
+  // Counter-intuitively, doing this in parallel here is fine: it's already
+  // an exception path, and if 4+ candidates were dropped we want speed
+  // back, not stricter sequencing.
+  const out: DraftScore[] = [];
+  const missingIndices: number[] = [];
+  for (let i = 0; i < chunk.length; i++) {
+    const s = slotted[i];
+    if (s) {
+      out[i] = s;
+    } else {
+      missingIndices.push(i);
+    }
+  }
+  if (missingIndices.length > 0) {
+    console.warn(
+      `[presenceDrafter] batch score returned ${arr.length}/${chunk.length} entries, individually scoring ${missingIndices.length} dropped candidates`,
+    );
+    const recovered = await Promise.all(
+      missingIndices.map((i) => scoreCandidate(db, settings, chunk[i])),
+    );
+    for (let k = 0; k < missingIndices.length; k++) {
+      out[missingIndices[k]] = recovered[k];
+    }
+  }
+
+  return out;
 }
 
 // ───────────────────────── Stage 2 · draft ─────────────────────────
