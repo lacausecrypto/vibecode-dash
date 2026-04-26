@@ -1,20 +1,26 @@
+import { createHmac, randomBytes } from 'node:crypto';
 import { keychain } from '../lib/keychain';
 
 /**
- * X (Twitter) API v2 wrapper — Bearer token, read-only.
+ * X (Twitter) API v2 wrapper.
  *
- * V1 scope: we use the user's personal Bearer token (OAuth 2.0 App-Only, the
- * one pasted from developer.x.com) for all read operations. That unlocks:
- *   - GET /2/lists/:id/tweets
- *   - GET /2/users/:id/tweets
- *   - GET /2/tweets/search/recent
- *   - GET /2/tweets/:id  (public_metrics for engagement polling)
+ * Two auth surfaces, on purpose:
  *
- * We do NOT post from here. The user posts manually from their own account
- * and marks the draft as posted; the engagement poller then reads the public
- * tweet metrics using the same Bearer. Posting needs OAuth 2.0 User Context
- * with PKCE, which we'll wire in a later phase if the user wants one-click
- * publish.
+ *   READ path — OAuth 2.0 App-Only Bearer Token (`x:bearer` in keychain).
+ *   Used for /2/lists/:id/tweets, /2/users/:id/tweets, /2/tweets/search/recent,
+ *   /2/tweets/:id (engagement polling). Single token, no signing, fast to set up.
+ *
+ *   WRITE path — OAuth 1.0a User Context (4-key flow). Required for
+ *   POST /2/tweets because /2/tweets does NOT accept App-Only Bearer.
+ *   The user generates the four keys directly in their developer portal
+ *   (no callback, no PKCE, no refresh) and stores them in the keychain:
+ *     x:consumer_key            (= API Key)
+ *     x:consumer_secret         (= API Key Secret)
+ *     x:access_token            (= Access Token)
+ *     x:access_token_secret     (= Access Token Secret)
+ *   We sign each request with HMAC-SHA1 over the canonical base string
+ *   (RFC 5849 §3.4.1). OAuth 1.0a is officially supported on /2/tweets
+ *   per X devcom; sunset will be pre-announced.
  *
  * PAYG strategy (see presence/docs): we funnel scans to minimize reads:
  *   1. List timeline (cheapest, highest signal/noise)
@@ -503,4 +509,181 @@ export function buildTopicQuery(
   // Only emit min_faves if explicitly requested — this operator is Pro-only.
   if (opts.minFaves != null) parts.push(`min_faves:${opts.minFaves}`);
   return parts.join(' ');
+}
+
+// ───────────────────── OAuth 1.0a User Context (write) ─────────────────────
+
+const X_OAUTH1_KEYCHAIN_KEYS = [
+  'x:consumer_key',
+  'x:consumer_secret',
+  'x:access_token',
+  'x:access_token_secret',
+] as const;
+
+type XOAuth1Keys = {
+  consumerKey: string;
+  consumerSecret: string;
+  accessToken: string;
+  accessTokenSecret: string;
+};
+
+async function loadOAuth1Keys(): Promise<XOAuth1Keys> {
+  const [consumerKey, consumerSecret, accessToken, accessTokenSecret] = await Promise.all(
+    X_OAUTH1_KEYCHAIN_KEYS.map((k) =>
+      keychain.get(k).catch(() => {
+        throw new Error(
+          `X OAuth 1.0a key "${k}" missing from keychain — generate the 4 keys in https://developer.x.com keys-and-tokens tab and store them via /api/presence/x/save-write-creds`,
+        );
+      }),
+    ),
+  );
+  return { consumerKey, consumerSecret, accessToken, accessTokenSecret };
+}
+
+/**
+ * Whether all four OAuth 1.0a keys are present. Cheap probe used by the
+ * UI to show a "Connect X for posting" call-to-action when missing.
+ */
+export async function xCanPost(): Promise<boolean> {
+  try {
+    await loadOAuth1Keys();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Persist the four OAuth 1.0a keys. Call from the UI after the user
+ * pastes them from the developer portal. Bearer-only credentials
+ * (`x:bearer`, `x:username`) stay independent — read and write paths
+ * use distinct tokens and one can be set without the other.
+ */
+export async function saveXWriteCreds(input: XOAuth1Keys): Promise<void> {
+  await Promise.all([
+    keychain.set('x:consumer_key', input.consumerKey),
+    keychain.set('x:consumer_secret', input.consumerSecret),
+    keychain.set('x:access_token', input.accessToken),
+    keychain.set('x:access_token_secret', input.accessTokenSecret),
+  ]);
+}
+
+export async function deleteXWriteCreds(): Promise<void> {
+  await Promise.all(X_OAUTH1_KEYCHAIN_KEYS.map((k) => keychain.delete(k)));
+}
+
+/**
+ * RFC 3986 §2.1 percent-encoding. URLSearchParams + encodeURIComponent
+ * are NOT 3986-strict (they leave `!*'()` alone); X's signature-base
+ * comparison rejects those, so we patch them after.
+ */
+export function pctEncode(s: string): string {
+  return encodeURIComponent(s).replace(
+    /[!*'()]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/**
+ * Build the `Authorization: OAuth ...` header value for a request.
+ *
+ * `bodyParams` — only for `application/x-www-form-urlencoded` request
+ * bodies, where parameters MUST be folded into the signature base string.
+ * For JSON-body endpoints (POST /2/tweets), pass `undefined`: only the
+ * oauth_* params are signed, per RFC 5849 §3.4.1.3.
+ *
+ * Exported for testability: the entire signature pipeline is pure given
+ * a fixed timestamp + nonce, so unit tests verify it against canonical
+ * vectors before any network code runs.
+ */
+export function buildOAuth1Header(opts: {
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  url: string; // exact request URL WITHOUT query string
+  queryParams?: Record<string, string>;
+  bodyParams?: Record<string, string>;
+  keys: XOAuth1Keys;
+  // Test seam: pass deterministic values from unit tests.
+  timestamp?: string;
+  nonce?: string;
+}): string {
+  const oauth: Record<string, string> = {
+    oauth_consumer_key: opts.keys.consumerKey,
+    oauth_nonce: opts.nonce ?? randomBytes(16).toString('hex'),
+    oauth_signature_method: 'HMAC-SHA1',
+    oauth_timestamp: opts.timestamp ?? Math.floor(Date.now() / 1000).toString(),
+    oauth_token: opts.keys.accessToken,
+    oauth_version: '1.0',
+  };
+
+  // Signature base string = METHOD & pctEncode(URL) & pctEncode(sorted-params)
+  // Params include: oauth_*, query string, AND form-body params (if any).
+  const allParams: Record<string, string> = {
+    ...oauth,
+    ...(opts.queryParams ?? {}),
+    ...(opts.bodyParams ?? {}),
+  };
+  const paramStr = Object.keys(allParams)
+    .sort()
+    .map((k) => `${pctEncode(k)}=${pctEncode(allParams[k])}`)
+    .join('&');
+  const baseString = [opts.method, pctEncode(opts.url), pctEncode(paramStr)].join('&');
+  const signingKey = `${pctEncode(opts.keys.consumerSecret)}&${pctEncode(
+    opts.keys.accessTokenSecret,
+  )}`;
+  oauth.oauth_signature = createHmac('sha1', signingKey).update(baseString).digest('base64');
+
+  // Header serialization — only oauth_* in the header, query/body stay
+  // in the actual request. Order alphabetical (X is permissive but it's
+  // the convention).
+  const headerFields = Object.keys(oauth)
+    .sort()
+    .map((k) => `${pctEncode(k)}="${pctEncode(oauth[k])}"`)
+    .join(', ');
+  return `OAuth ${headerFields}`;
+}
+
+export type XPostTweetResult = {
+  id: string;
+  text: string;
+};
+
+/**
+ * POST /2/tweets with OAuth 1.0a User Context.
+ *
+ * `text` — required, ≤ 280 characters (X enforces; we don't validate
+ * here so the caller surface gets the precise error message back).
+ * `replyToId` — when set, posts as a reply to that tweet id.
+ *
+ * Throws on non-2xx with the response body sliced to 500 chars so the
+ * audit log stays readable.
+ */
+export async function xPostTweet(
+  text: string,
+  opts: { replyToId?: string } = {},
+): Promise<XPostTweetResult> {
+  const keys = await loadOAuth1Keys();
+  const url = `${API_BASE}/tweets`;
+  const auth = buildOAuth1Header({ method: 'POST', url, keys });
+  const body = opts.replyToId
+    ? { text, reply: { in_reply_to_tweet_id: opts.replyToId } }
+    : { text };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: auth,
+      'Content-Type': 'application/json',
+      'User-Agent': 'vibecode-dash/presence-copilot',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`X POST /2/tweets failed (${res.status}): ${detail.slice(0, 500)}`);
+  }
+  const json = (await res.json()) as { data?: { id?: string; text?: string } };
+  if (!json.data?.id) {
+    throw new Error(`X POST /2/tweets returned no id: ${JSON.stringify(json).slice(0, 300)}`);
+  }
+  return { id: json.data.id, text: json.data.text ?? text };
 }

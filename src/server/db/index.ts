@@ -17,6 +17,7 @@ import * as migration0013 from './migrations/0013_social_presence';
 import * as migration0014 from './migrations/0014_source_validation';
 import * as migration0015 from './migrations/0015_source_health';
 import * as migration0016 from './migrations/0016_prune_cooldown';
+import * as migration0017 from './migrations/0017_presence_publish_log';
 
 type Migration = {
   version: number;
@@ -40,6 +41,7 @@ const MIGRATIONS: Migration[] = [
   migration0014,
   migration0015,
   migration0016,
+  migration0017,
 ].sort((a, b) => a.version - b.version);
 
 let dbInstance: Database | null = null;

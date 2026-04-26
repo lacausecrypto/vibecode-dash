@@ -96,6 +96,38 @@ const SettingsSchema = z.object({
       // stored without `@` and lowercased on read. Empty / unset =
       // built-in AI-and-indie-dev list.
       highValueAuthorHandles: z.array(z.string()).default([]),
+
+      // ─── Auto-publish (Tier 1: scheduled X drafts + Reddit deeplinks) ───
+      //
+      // Master kill-switch. Default 'off' — auto-publish does NOTHING until
+      // the user explicitly opts in. 'dry_run' logs what WOULD have happened
+      // (presence_publish_log row with decision='dry_run') without calling
+      // any platform API. 'live' flips the worker to actually post.
+      publishMode: z.enum(['off', 'dry_run', 'live']).default('off'),
+      // Hard daily cap per platform (resets at LOCAL midnight). Once hit,
+      // remaining approved drafts wait until tomorrow.
+      // X anti-spam guidance: ≤ 15-20 tweets/day. Reddit: low single-digits
+      // per account-day to avoid AutoMod / shadowban.
+      maxPostsPerDayX: z.number().int().min(0).max(50).default(10),
+      maxPostsPerDayReddit: z.number().int().min(0).max(50).default(5),
+      // Posting window (hours, local time, 24h clock). 9..17 = posts only
+      // emit between 9:00 and 17:00. Cross-midnight windows (e.g. 22..6)
+      // are unsupported on purpose — too easy to misread.
+      publishWindowStartHour: z.number().int().min(0).max(23).default(9),
+      publishWindowEndHour: z.number().int().min(1).max(24).default(17),
+      // Days of week the worker is allowed to post (0=Sun..6=Sat). Default
+      // weekdays only. Reddit/X engagement on weekends is generally lower
+      // for the AI-dev audience this dashboard targets.
+      publishDays: z.array(z.number().int().min(0).max(6)).default([1, 2, 3, 4, 5]),
+      // Cooldown between two auto-publishes targeting the SAME source. A
+      // 24 h floor avoids visibly rate-bombing a single subreddit / X list
+      // even when 4+ approved drafts exist for it.
+      publishCooldownPerSourceHours: z.number().min(0).default(24),
+      // Random ± minutes added on top of the worker's tick scheduling so
+      // posts don't go out exactly on the minute. ML detection on both
+      // platforms flags identical-cadence posting; ±10 min is well within
+      // human variance.
+      publishJitterMinutes: z.number().int().min(0).max(60).default(10),
     })
     .default({
       drafterProvider: 'claude',
@@ -106,6 +138,14 @@ const SettingsSchema = z.object({
       dailyBudgetUsd: 0.5,
       engagementPollEnabled: true,
       highValueAuthorHandles: [],
+      publishMode: 'off',
+      maxPostsPerDayX: 10,
+      maxPostsPerDayReddit: 5,
+      publishWindowStartHour: 9,
+      publishWindowEndHour: 17,
+      publishDays: [1, 2, 3, 4, 5],
+      publishCooldownPerSourceHours: 24,
+      publishJitterMinutes: 10,
     }),
   subscriptions: z
     .object({
@@ -159,6 +199,14 @@ function buildDefaults(): Settings {
       dailyBudgetUsd: 0.5,
       engagementPollEnabled: true,
       highValueAuthorHandles: [],
+      publishMode: 'off',
+      maxPostsPerDayX: 10,
+      maxPostsPerDayReddit: 5,
+      publishWindowStartHour: 9,
+      publishWindowEndHour: 17,
+      publishDays: [1, 2, 3, 4, 5],
+      publishCooldownPerSourceHours: 24,
+      publishJitterMinutes: 10,
     },
     subscriptions: {
       usdToEur: 0.93,

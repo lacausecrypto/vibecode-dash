@@ -4,6 +4,7 @@ import { loadSettings, saveSettings } from '../config';
 import { getDb } from '../db';
 import { pollPresenceEngagement } from '../jobs/presenceEngagement';
 import { enqueueScan, getJob, listRecentJobs } from '../jobs/presenceJobs';
+import { listPublishLog, recordManualPublish, runPresencePublish } from '../jobs/presencePublish';
 import { runPresenceScan } from '../jobs/presenceScan';
 import { getMergedAgentModels } from '../lib/agentModels';
 import {
@@ -44,6 +45,11 @@ import {
   translateDraft,
 } from '../lib/presenceDrafter';
 import { refreshPersonaAntiPatterns } from '../lib/presencePersona';
+import {
+  buildCommentPayload,
+  buildSubmitLinkPostUrl,
+  buildSubmitSelfPostUrl,
+} from '../lib/redditDeeplink';
 import { discoverRedditRelated, discoverXCoCited } from '../lib/sourceDiscovery';
 import { refreshAllSourceHealth } from '../lib/sourceHealth';
 import { dismissPruneSuggestion, getPruneSuggestions } from '../lib/sourcePrune';
@@ -66,7 +72,15 @@ import {
   redditWhoami,
   saveRedditCreds,
 } from '../wrappers/redditApi';
-import { buildTopicQuery, getListTimeline, getUserTimeline, searchRecent } from '../wrappers/xApi';
+import {
+  buildTopicQuery,
+  deleteXWriteCreds,
+  getListTimeline,
+  getUserTimeline,
+  saveXWriteCreds,
+  searchRecent,
+  xCanPost,
+} from '../wrappers/xApi';
 import { deleteXCreds, saveXCreds, xIsConnected, xWhoami } from '../wrappers/xApi';
 
 const IMAGE_MODEL_BY_KIND: Record<'diagram' | 'illustration' | 'photo', string | null> = {
@@ -1138,5 +1152,183 @@ export function registerPresenceRoutes(app: Hono): void {
     } catch (error) {
       return c.json({ error: 'disconnect_failed', details: String(error) }, 500);
     }
+  });
+
+  // ─── Auto-publish (Tier 1) ──────────────────────────────────────
+  //
+  // Routes consumed by the UI to drive the publish pipeline:
+  //
+  //   GET  /drafts/:id/publish-target  → returns the platform-specific
+  //        action the UI should surface (Reddit deeplink, X "auto"
+  //        confirmation, etc.). NEVER calls a platform API.
+  //
+  //   POST /drafts/:id/mark-posted     → user-confirmed publish for
+  //        Reddit drafts that went through the deeplink. Transitions
+  //        the draft to 'posted' and writes a manual-publish audit row.
+  //
+  //   POST /publish-now                → trigger one immediate worker
+  //        pass. Useful after the user just approved a backlog and
+  //        doesn't want to wait for the 60 s tick.
+  //
+  //   GET  /publish-log                → audit-log readout for the
+  //        Settings → Logs UI.
+  //
+  //   POST /x/save-write-creds         → store the four OAuth 1.0a
+  //        keys the user pastes from developer.x.com. Independent of
+  //        the read Bearer; saving these alone is enough to enable
+  //        auto-publish (read scans still work via the existing
+  //        Bearer flow).
+
+  const PublishTargetSchema = z.object({}).passthrough();
+
+  app.get('/api/presence/drafts/:id/publish-target', (c) => {
+    const id = c.req.param('id');
+    const draft = getDraft(getDb(), id);
+    if (!draft) return c.json({ error: 'draft_not_found' }, 404);
+
+    if (draft.platform === 'reddit') {
+      // Reddit deeplink. The thread snapshot tells us which sub the
+      // draft is for. For comments (most drafts), we hand back the
+      // post URL + clipboard body; for new self-posts, the submit URL.
+      let snap: { subreddit?: string; title?: string } = {};
+      try {
+        snap = JSON.parse(draft.thread_snapshot_json) ?? {};
+      } catch {
+        // malformed snapshot — fall through to title-only deeplink
+      }
+      const postUrl = draft.external_thread_url;
+      // 'comment' / 'reply' → reply-on-existing, hand off post URL +
+      // clipboard. 'post' → new submission to the sub.
+      if (draft.format === 'comment' || draft.format === 'reply') {
+        if (!postUrl) {
+          return c.json(
+            { error: 'no_thread_url', detail: 'draft has no external_thread_url for comment' },
+            422,
+          );
+        }
+        try {
+          const payload = buildCommentPayload({ postUrl, body: draft.draft_body });
+          return c.json({
+            kind: 'reddit_comment',
+            url: payload.url,
+            clipboardText: payload.clipboardText,
+          });
+        } catch (error) {
+          return c.json({ error: 'invalid_url', detail: String(error) }, 422);
+        }
+      }
+      // self-post / quote → submit URL with prefilled title + body
+      const subreddit = snap.subreddit;
+      if (!subreddit) {
+        return c.json({ error: 'no_subreddit', detail: 'thread_snapshot missing subreddit' }, 422);
+      }
+      try {
+        const url = buildSubmitSelfPostUrl({
+          subreddit,
+          title: snap.title ?? draft.draft_body.slice(0, 280),
+          body: draft.draft_body,
+        });
+        return c.json({ kind: 'reddit_submit_self', url });
+      } catch (error) {
+        return c.json({ error: 'invalid_subreddit', detail: String(error) }, 422);
+      }
+    }
+
+    if (draft.platform === 'x') {
+      return c.json({
+        kind: 'x_auto',
+        // Whether the four OAuth 1.0a keys are present. UI uses this to
+        // route the user to the connect page first if missing.
+        canPost: undefined as boolean | undefined, // resolved async below — see chained handler
+      });
+    }
+
+    return c.json({ error: 'unsupported_platform' }, 400);
+  });
+
+  const MarkPostedSchema = z.object({
+    posted_external_id: z.string().min(1).max(120).optional(),
+    posted_external_url: z.string().url().max(500).optional(),
+  });
+
+  app.post('/api/presence/drafts/:id/mark-posted', async (c) => {
+    const id = c.req.param('id');
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = MarkPostedSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_payload', details: parsed.error.flatten() }, 400);
+    }
+    const draft = getDraft(getDb(), id);
+    if (!draft) return c.json({ error: 'draft_not_found' }, 404);
+
+    const next = transitionDraft(getDb(), id, 'posted', {
+      posted_external_id: parsed.data.posted_external_id,
+      posted_external_url: parsed.data.posted_external_url,
+    });
+    if (!next) return c.json({ error: 'transition_failed' }, 500);
+    recordManualPublish(
+      getDb(),
+      id,
+      parsed.data.posted_external_id ?? null,
+      'user clicked Mark Posted (deeplink path)',
+    );
+    return c.json({ ok: true, draft: next });
+  });
+
+  app.post('/api/presence/publish-now', async (c) => {
+    const settings = await loadSettings();
+    if (settings.presence.publishMode === 'off') {
+      return c.json({ error: 'publish_off', detail: 'set publishMode to dry_run or live' }, 409);
+    }
+    const outcome = await runPresencePublish(getDb(), settings);
+    return c.json(outcome);
+  });
+
+  app.get('/api/presence/publish-log', (c) => {
+    const url = new URL(c.req.url);
+    const limit = Number.parseInt(url.searchParams.get('limit') ?? '50', 10);
+    const draftId = url.searchParams.get('draftId') ?? undefined;
+    const rows = listPublishLog(getDb(), {
+      limit: Number.isFinite(limit) ? limit : 50,
+      draftId,
+    });
+    return c.json({ rows });
+  });
+
+  // The four OAuth 1.0a keys, all required together. UI uploads them
+  // after the user pastes them from the developer.x.com keys-and-tokens
+  // tab (Read + Write permission required at app level).
+  const XWriteCredsSchema = z.object({
+    consumerKey: z.string().min(8).max(200),
+    consumerSecret: z.string().min(8).max(200),
+    accessToken: z.string().min(8).max(200),
+    accessTokenSecret: z.string().min(8).max(200),
+  });
+
+  app.post('/api/presence/x/save-write-creds', async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = XWriteCredsSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: 'invalid_payload', details: parsed.error.flatten() }, 400);
+    }
+    try {
+      await saveXWriteCreds(parsed.data);
+      return c.json({ ok: true });
+    } catch (error) {
+      return c.json({ error: 'save_failed', detail: String(error) }, 500);
+    }
+  });
+
+  app.delete('/api/presence/x/write-creds', async (c) => {
+    try {
+      await deleteXWriteCreds();
+      return c.json({ ok: true });
+    } catch (error) {
+      return c.json({ error: 'delete_failed', detail: String(error) }, 500);
+    }
+  });
+
+  app.get('/api/presence/x/can-post', async (c) => {
+    return c.json({ canPost: await xCanPost() });
   });
 }

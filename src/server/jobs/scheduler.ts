@@ -8,6 +8,7 @@ import { reindexObsidianVault } from '../scanners/obsidianScanner';
 import { scanAllProjects } from '../scanners/projectScanner';
 import { getCodexLiveRateLimits } from '../wrappers/codexOauth';
 import { pollPresenceEngagement } from './presenceEngagement';
+import { runPresencePublish } from './presencePublish';
 import { runPresenceScan } from './presenceScan';
 import { syncUsageByProject } from './usageByProjectSync';
 import { syncUsageDaily } from './usageSync';
@@ -178,6 +179,22 @@ export async function startScheduler(): Promise<void> {
       run: async () => {
         const live = await loadSettings();
         await refreshPersonaAntiPatterns(db, live);
+      },
+    },
+    {
+      // Auto-publish worker. Tick every 60 s; the worker itself returns
+      // immediately when settings.presence.publishMode === 'off' (default)
+      // so the cycle is essentially free until the user opts in. The 60 s
+      // cadence is short enough that approved drafts inside the time
+      // window go out within a minute, and the per-platform daily caps
+      // + per-source cooldowns are checked on every tick so nothing
+      // races even if the user approves a backlog at once.
+      name: 'presence_publish',
+      intervalMs: 60_000,
+      run: async () => {
+        const live = await loadSettings();
+        if (live.presence?.publishMode === 'off') return;
+        await runPresencePublish(db, live);
       },
     },
   ];
