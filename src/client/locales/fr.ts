@@ -1980,7 +1980,7 @@ export const DICT_FR = {
       },
       reddit: {
         title: 'Reddit',
-        meta: 'Optionnel : OAuth script-type pour des reads enrichis + polling engagement sur tes propres posts. Sans ça, les endpoints publics .json laissent quand même tourner le scan (rate-limit léger).',
+        meta: 'Le post sur Reddit ne nécessite AUCUNE auth — utilise le bouton "Assist" sur n\'importe quel draft : il copie le body au clipboard et ouvre Reddit pré-rempli (composer ou thread). Tu cliques Post toi-même puis "Mark posted" au retour. La connexion OAuth ci-dessous reste OPTIONNELLE pour des reads enrichis (engagement polling sur tes propres posts), et l\'enregistrement est verrouillé depuis nov 2025 (Responsible Builder Policy) — tes creds existantes fonctionnent toujours, les nouveaux comptes n\'arrivent pas à enregistrer.',
         connect: 'Connecter Reddit',
         connected: 'Reddit connecté',
         publicMode: 'mode public',

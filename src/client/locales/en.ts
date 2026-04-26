@@ -1971,7 +1971,7 @@ export const DICT_EN = {
       },
       reddit: {
         title: 'Reddit',
-        meta: 'Optional: script-type OAuth for richer reads + engagement polling on your own posts. Without it, public .json endpoints still let scanning work (rate-limited).',
+        meta: 'Posting on Reddit needs NO auth — use the "Assist" button on any draft: it copies the body to clipboard and opens Reddit pre-filled (composer or thread). You click Post yourself, then "Mark posted" on return. The OAuth connection below stays OPTIONAL for richer reads (engagement polling on your own posts), and registration has been locked since Nov 2025 (Responsible Builder Policy) — existing credentials still work, new accounts can\'t register.',
         connect: 'Connect Reddit',
         connected: 'Reddit connected',
         publicMode: 'public mode',
