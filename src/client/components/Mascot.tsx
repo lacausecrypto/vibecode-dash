@@ -249,24 +249,34 @@ function deriveState(now: number, rt: RuntimeState): MascotState {
   if (now - rt.lastNotificationAt < COOLDOWN.notification) return 'notification';
 
   // 2. In-flight. We pick the most semantically specific sprite based on
-  //    the request paths in flight, with `building` (>5 s heavy) as the
-  //    universal escalation when anything has been hanging too long.
+  //    the request paths in flight. Path classification wins over the
+  //    "heavy" escalation: a 3-min presence scan should stay `sweeping`,
+  //    not flip to a generic `building` after 5 s — the metaphor carries
+  //    more information than the duration.
   const inflightCount = rt.inflight.size;
   if (inflightCount > 0) {
     const inflightArr = [...rt.inflight.values()];
-    const oldest = inflightArr.reduce((max, v) => Math.max(max, now - v.startedAt), 0);
-    if (oldest > HEAVY_FETCH_MS) return 'building';
 
-    // Path-based specificity: the new sprites add metaphor (sweeping,
-    // conducting, carrying). If multiple classes are in flight, prefer
+    // Path-based specificity. If multiple classes are in flight, prefer
     // the one with the most semantic weight: agent > sync > asset.
     const classes = new Set(inflightArr.map((v) => v.pathClass));
     if (classes.has('agent')) return 'conducting';
     if (classes.has('sync')) return 'sweeping';
     if (classes.has('asset')) return 'carrying';
 
+    // Fallback: no specific class matched. `building` only kicks in when
+    // a generic fetch has been hanging long enough to look stuck.
+    const oldest = inflightArr.reduce((max, v) => Math.max(max, now - v.startedAt), 0);
+    if (oldest > HEAVY_FETCH_MS) return 'building';
+
     if (inflightCount >= 3) return 'juggling';
-    const anyMutation = inflightArr.some((v) => v.method !== 'GET' && v.method !== 'HEAD');
+    // Exclude TASK entries from the "is this a mutation?" check — tasks
+    // are background operations, not user-initiated saves, so they
+    // shouldn't masquerade as `typing`. They keep the mascot busy via
+    // path-classified branches above when their path matches a class.
+    const anyMutation = inflightArr.some(
+      (v) => v.method !== 'GET' && v.method !== 'HEAD' && v.method !== 'TASK',
+    );
     return anyMutation ? 'typing' : 'thinking';
   }
 
@@ -374,6 +384,22 @@ export function Mascot({ size = 56 }: { size?: number }) {
         }
         case 'notification': {
           r.lastNotificationAt = e.at;
+          break;
+        }
+        case 'task:start': {
+          // Synthetic inflight entry. We use a sentinel method 'TASK' so
+          // the heavy/mutation/concurrent branches can ignore it (a task
+          // shouldn't masquerade as a POST). Path classification still
+          // works — that's the whole point of this signal.
+          r.inflight.set(`TASK:${e.taskId}`, {
+            method: 'TASK',
+            startedAt: e.at,
+            pathClass: classifyPath(e.path),
+          });
+          break;
+        }
+        case 'task:end': {
+          r.inflight.delete(`TASK:${e.taskId}`);
           break;
         }
       }

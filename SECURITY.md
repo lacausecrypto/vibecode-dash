@@ -28,8 +28,8 @@ The Hono server binds `127.0.0.1` only, never `0.0.0.0`. See [`src/server/index.
 
 Three independent checks, all enforced by [`src/server/lib/auth.ts`](src/server/lib/auth.ts):
 
-1. **Host header** must resolve to loopback (`127.0.0.1`, `localhost`, `::1`). Blocks DNS rebinding where an attacker gets a browser to send a request to `127.0.0.1` via a hostname they control.
-2. **Origin header**, when present, must be a loopback origin. Blocks CSRF from third-party pages (which a browser would auto-attach `Origin` to on unsafe methods).
+1. **Host header** must resolve to loopback (`127.0.0.1`, `localhost`, `::1`) **or to an explicitly allow-listed external host** (see *Remote access via Tailscale* below). Blocks DNS rebinding where an attacker gets a browser to send a request to `127.0.0.1` via a hostname they control.
+2. **Origin header**, when present, must be loopback or an allow-listed origin. Blocks CSRF from third-party pages (which a browser would auto-attach `Origin` to on unsafe methods).
 3. **`X-Dashboard-Token` header** must match a 64-hex-character secret generated at first boot and compared with `timingSafeEqual`. The token lives at:
    - macOS: `~/Library/Application Support/vibecode-dash/auth-token`
    - Linux: `$XDG_DATA_HOME/vibecode-dash/auth-token` (or `~/.local/share/vibecode-dash/auth-token`)
@@ -37,6 +37,52 @@ Three independent checks, all enforced by [`src/server/lib/auth.ts`](src/server/
    - File mode `0600` (Windows: NTFS ACLs via user profile scope).
 
 `OPTIONS` preflights bypass the auth checks so CORS works cleanly. `/api/auth/token` and `/api/health` are ungated (but still pass Host + Origin).
+
+### Remote access via Tailscale
+
+The dashboard never opens a port beyond loopback **and never will**. Remote access (e.g. accessing the dashboard from your iPhone) goes through a reverse proxy you trust the auth of — typically [Tailscale](https://tailscale.com/) running on the same Mac.
+
+Architecture:
+
+```
+iPhone ─[WireGuard tunnel]─► tailscaled (100.x.x.x:443, TLS auto-cert)
+                                  │ reverse proxy
+                                  ▼
+                             127.0.0.1:4317  (vibecode-dash, UNCHANGED)
+```
+
+The Tailscale daemon already running on your Mac terminates TLS with a Let's Encrypt cert provisioned by Tailscale, then forwards to localhost. The vibecode-dash server stays bound to `127.0.0.1` — only the local proxy can reach it. Identity is enforced at the WireGuard layer (per-device keys, revocable from `https://login.tailscale.com/admin/machines`).
+
+Setup:
+
+```bash
+# On the Mac, expose the dashboard on the Tailnet
+tailscale serve --bg --https=443 http://127.0.0.1:4317
+
+# Find the hostname Tailscale assigned
+tailscale status   # → e.g. "mac.tail-beefcafe.ts.net"
+```
+
+Because the Host/Origin gate rejects everything that isn't loopback by default, you must tell the dashboard which external hostname to accept. Set `VIBECODEDASH_ALLOWED_HOSTS` (comma-separated, port-stripped, case-insensitive) before launching the server:
+
+```bash
+VIBECODEDASH_ALLOWED_HOSTS="mac.tail-beefcafe.ts.net" bunx vibecode-dash
+```
+
+The token + Origin checks still apply on top — the allowlist relaxes the **Host gate only**, not authentication. A Tailnet peer who reaches the dashboard still needs the token, which they fetch from the ungated `/api/auth/token` endpoint on first hit (then stored in localStorage).
+
+What this gives you:
+
+- ✅ Server stays `127.0.0.1` (unchanged binding, defence-in-depth preserved)
+- ✅ TLS to your iPhone (no self-signed cert pain)
+- ✅ Identity revocable per-device from the Tailscale admin console
+- ✅ Public internet exposure stays OFF (Tailnet peers only — Tailscale Funnel must be opted in separately and is **not** what `tailscale serve` does)
+
+What you still need to know:
+
+- The token endpoint is ungated. Anyone in your Tailnet can fetch it. Keep your Tailnet personal or audit `tailscale status` regularly.
+- Don't enable [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) on this service unless you really mean to expose it to the public internet — Funnel routes any internet client through to the proxy, bypassing the Tailnet identity gate.
+- If you lose your iPhone, revoke its key from the [Tailscale admin console](https://login.tailscale.com/admin/machines) — the device is removed from the Tailnet and can't reach the dashboard. The on-disk auth token stays valid (still required by other peers), so no token rotation is needed unless the device was compromised at the keychain level.
 
 ### Secrets at rest
 

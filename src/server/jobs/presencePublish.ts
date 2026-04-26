@@ -361,8 +361,27 @@ async function processDraft(
   }
 
   // ── Live publish ─────────────────────────────
+  //
+  // Reply vs standalone:
+  //   - format='comment'/'reply' AND external_thread_id is set → POST as
+  //     a reply to that tweet via xPostTweet(text, { replyToId }).
+  //   - format='post'/'quote' OR no external_thread_id → standalone post.
+  //
+  // The scanner sets `external_thread_id` to the parent tweet id when it
+  // ingests a candidate from a list/topic search, so a draft with format
+  // 'reply' will always carry the right anchor. Defensively, we still
+  // guard on both signals — a misconfigured manual draft (format=reply
+  // but no thread id) falls through to standalone with a warning.
+  const isReply =
+    (d.format === 'comment' || d.format === 'reply') &&
+    typeof d.external_thread_id === 'string' &&
+    d.external_thread_id.length > 0;
+
   try {
-    const result = await xPostTweet(d.draft_body);
+    const result = await xPostTweet(
+      d.draft_body,
+      isReply ? { replyToId: d.external_thread_id ?? undefined } : {},
+    );
     transitionDraft(db, d.id, 'posted', {
       posted_external_id: result.id,
       posted_external_url: `https://x.com/i/web/status/${result.id}`,
@@ -370,7 +389,9 @@ async function processDraft(
     recordDecision(db, {
       draft_id: d.id,
       decision: 'published',
-      reason: `tweet id=${result.id}`,
+      reason: isReply
+        ? `tweet id=${result.id} (reply to ${d.external_thread_id})`
+        : `tweet id=${result.id}`,
       platform_post_id: result.id,
     });
     return { decision: 'published' };

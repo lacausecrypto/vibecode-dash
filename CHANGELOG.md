@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Remote access via Tailscale (allow-listed hosts)
+
+The dashboard still binds `127.0.0.1` only, but `auth.ts` now accepts
+an explicit allowlist of external Host/Origin headers via the
+`VIBECODEDASH_ALLOWED_HOSTS` env var. Comma-separated, case-insensitive,
+port-stripped on match.
+
+```bash
+VIBECODEDASH_ALLOWED_HOSTS="mac.tailbeef.ts.net,100.64.0.5" bunx vibecode-dash
+```
+
+The intended setup pairs this with `tailscale serve` running on the
+same host:
+
+```bash
+tailscale serve --bg --https=443 http://127.0.0.1:4317
+```
+
+The Tailscale daemon terminates TLS with a Let's Encrypt cert it
+provisions automatically, then reverse-proxies to localhost. The
+dashboard server stays loopback-bound; only the local proxy reaches it.
+Identity is enforced at the WireGuard layer (per-device, revocable
+from the Tailscale admin console).
+
+The token + Origin checks still apply on top — the allowlist is a
+relaxation of the **Host gate only**, not of authentication. A Tailnet
+peer reaching the dashboard still needs the `X-Dashboard-Token`, fetched
+from the ungated `/api/auth/token` endpoint on first hit.
+
+Empty / unset env var keeps the strict loopback-only behavior (the
+historical default). 25 new unit tests in `auth.test.ts` cover:
+parseAllowedHosts (env parsing, IPv6 brackets, case + port stripping),
+hostIsAllowed (loopback fast-path, allowlist match, missing/empty
+host), originIsAllowed (https origins, wrong protocol, malformed URL),
+plus 5 end-to-end middleware tests through Hono with a Tailscale-style
+allowed host (GET pass, POST with Origin pass, evil Origin reject,
+non-allowed Host reject, token still required).
+
+`SECURITY.md` documents the full architecture under "Remote access via
+Tailscale" with the threat model deltas (token exposure within Tailnet,
+Funnel opt-in warning, lost-device revocation flow).
+
+### Fixed — X auto-publish posts replies as replies, not standalones
+
+The `presencePublish` worker called `xPostTweet(d.draft_body)` without
+passing `replyToId`, so drafts marked as `format='comment'` or `'reply'`
+were posted as standalone tweets on the user's profile instead of as a
+reply to the parent thread. The `xPostTweet` wrapper already supported
+`{ replyToId }` — the worker just wasn't wiring it up.
+
+Fix: when `format` is `comment`/`reply` AND `external_thread_id` is
+present (always set by the scanner for thread candidates), the worker
+now passes `replyToId: d.external_thread_id` so the X API attaches
+`reply.in_reply_to_tweet_id` and the post lands as a thread reply.
+Audit log row reflects the distinction:
+
+```
+published   tweet id=<new>  (reply to <parent_id>)
+published   tweet id=<new>
+```
+
+Drafts with format `post`/`quote` or no `external_thread_id` continue
+to post standalone. The fix doesn't retroactively re-post existing
+`posted` drafts — those stay where they are.
+
 ### Quality — Stricter X tweet pre-CLI filtering
 
 The X scanner now scores every fetched tweet on a composite quality
