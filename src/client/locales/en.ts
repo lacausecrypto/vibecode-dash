@@ -1561,6 +1561,16 @@ export const DICT_EN = {
         askUrl:
           'Paste the URL of the {platform} you just published (or leave empty to skip engagement tracking):',
       },
+      autoPublish: {
+        published: '✅ Posted to X via OAuth 1.0a. Tweet is on your account.',
+        queued:
+          'Approved. Worker will post to {platform} on next tick (≤ 60s) if window + cap + cooldown allow.',
+        redditHandedOff:
+          "Approved. Reddit has no auto-publish API — use 'Open & copy' on this draft to open the pre-filled composer.",
+        skipped:
+          'Skipped ({decision}): {reason}. Check Settings → Auto-publish (mode/cap/window/cooldown).',
+        failed: '❌ Auto-post to X failed',
+      },
       assist: {
         copiedAndOpened:
           'Body copied to clipboard, {platform} opened with composer pre-filled. Review, click Post, come back to log the URL.',
@@ -1624,6 +1634,9 @@ export const DICT_EN = {
         edit: 'Edit',
         markPosted: 'Mark posted',
         markPostedTitle: 'Mark this draft as posted to your account',
+        autoPublish: 'Auto-post',
+        autoPublishTitle:
+          "Approve + auto-publish to X via your 4 OAuth 1.0a keys. Worker honours the rails (daily cap, time window, source cooldown, body dedup). Reddit uses 'Open & copy' since no official API is available.",
         assist: 'Open & copy',
         assistTitle:
           'Copy body + open {platform} in new tab. You paste, post, then log the URL — no API auth needed.',
