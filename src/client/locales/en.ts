@@ -1563,13 +1563,19 @@ export const DICT_EN = {
       },
       assist: {
         copiedAndOpened:
-          'Body copied to clipboard, {platform} opened in new tab. Paste, post, come back to log the URL.',
+          'Body copied to clipboard, {platform} opened with composer pre-filled. Review, click Post, come back to log the URL.',
         openedNoCopy:
-          '{platform} opened in new tab. Copy the body manually, paste, post, come back to log the URL.',
+          '{platform} opened with composer pre-filled. Review, click Post, come back to log the URL.',
         copiedOpenedWithImage:
-          'Body copied + image saved to Downloads, {platform} opened. Paste body, drag the PNG into the composer, post, come back to log the URL.',
+          'Body copied + image saved to Downloads, {platform} opened (composer pre-filled). Drag the PNG into the composer, post, come back to log the URL.',
         openedWithImageNoCopy:
-          'Image saved to Downloads, {platform} opened. Copy body manually + drag the PNG into the composer.',
+          'Image saved to Downloads, {platform} opened (composer pre-filled). Drag the PNG into the composer.',
+        redditComment:
+          "✂️ Body copied to clipboard. Reddit opened the thread — click 'Add a comment' and Cmd+V (Reddit does NOT support pre-filling the comment box via URL). Post, come back to log the URL.",
+        redditCommentWithImage:
+          '✂️ Body copied + image saved to Downloads. Reddit opened the thread — Cmd+V into the comment box + drag the PNG. Reddit has no URL pre-fill for comments.',
+        redditCommentNoCopy:
+          '⚠️ Clipboard blocked by browser. Reddit opened the thread — copy the body manually from the draft and paste into the comment box.',
         noUrlAvailable: "No source URL captured for this draft, can't open in browser",
       },
       translate: {

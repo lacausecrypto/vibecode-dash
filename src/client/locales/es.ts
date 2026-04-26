@@ -1565,13 +1565,19 @@ export const DICT_ES = {
       },
       assist: {
         copiedAndOpened:
-          'Body copiado al portapapeles, {platform} abierto en nueva pestaña. Pega, publica, vuelve para registrar la URL.',
+          'Body copiado al portapapeles, {platform} abierto con composer pre-rellenado. Revisa, haz clic en Post, vuelve para registrar la URL.',
         openedNoCopy:
-          '{platform} abierto en nueva pestaña. Copia el body manualmente, pega, publica, vuelve para registrar la URL.',
+          '{platform} abierto con composer pre-rellenado. Revisa, haz clic en Post, vuelve para registrar la URL.',
         copiedOpenedWithImage:
-          'Body copiado + imagen guardada en Descargas, {platform} abierto. Pega el body, arrastra el PNG al composer, publica, vuelve para registrar la URL.',
+          'Body copiado + imagen guardada en Descargas, {platform} abierto (composer pre-rellenado). Arrastra el PNG al composer, publica, vuelve para registrar la URL.',
         openedWithImageNoCopy:
-          'Imagen guardada en Descargas, {platform} abierto. Copia el body manualmente + arrastra el PNG al composer.',
+          'Imagen guardada en Descargas, {platform} abierto (composer pre-rellenado). Arrastra el PNG al composer.',
+        redditComment:
+          "✂️ Body copiado al portapapeles. Reddit abrió el thread — haz clic en 'Add a comment' y Cmd+V (Reddit NO permite pre-rellenar la caja de comentario vía URL). Publica, vuelve para registrar la URL.",
+        redditCommentWithImage:
+          '✂️ Body copiado + imagen guardada en Descargas. Reddit abrió el thread — Cmd+V en la caja de comentario + arrastra el PNG. Reddit no permite pre-relleno nativo.',
+        redditCommentNoCopy:
+          '⚠️ Portapapeles bloqueado por el navegador. Reddit abrió el thread — copia el body manualmente desde el draft y pégalo en la caja de comentario.',
         noUrlAvailable:
           'Sin URL fuente capturada para este draft, no se puede abrir en el navegador',
       },

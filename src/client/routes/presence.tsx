@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Chip, Empty, ErrorBanner, Section, Segmented, Stat } from '../components/ui';
+import { trackTask } from '../lib/activityBus';
 import { apiDelete, apiGet, apiPatch, apiPost } from '../lib/api';
 import { useTranslation } from '../lib/i18n';
 
@@ -659,13 +660,26 @@ export default function PresenceRoute() {
         // image from the draft card.
       }
 
-      // Pick the best URL to open. Reddit comments → original thread URL.
-      // Top-level posts → /r/sub/submit prefilled with title+text. X →
-      // intent/tweet pre-filled.
+      // Pick the best URL to open. Reddit comments → original thread URL
+      // with the `#comments` fragment so the page scrolls past the OP and
+      // lands near the reply input. Top-level posts → /r/sub/submit pre-
+      // filled with title+text (these URL params DO work). X → intent/tweet
+      // pre-filled.
+      //
+      // assistKind is set in parallel because Reddit comments have NO URL
+      // mechanism for pre-filling the comment textarea — body lives in
+      // clipboard only. The toast message switches on this so the user
+      // knows whether to expect a pre-filled composer or a Cmd+V step.
       let openUrl = '';
+      let assistKind: 'reddit_comment' | 'reddit_self_post' | 'x_intent' | null = null;
       if (draft.platform === 'reddit') {
         if (draft.external_thread_url) {
-          openUrl = draft.external_thread_url;
+          // Comment on existing thread. Append #comments so the browser
+          // scrolls past the OP. Skip if the URL already has a fragment.
+          openUrl = draft.external_thread_url.includes('#')
+            ? draft.external_thread_url
+            : `${draft.external_thread_url}#comments`;
+          assistKind = 'reddit_comment';
         } else {
           // Top-level post. Try to derive subreddit from snapshot.
           let sub: string | undefined;
@@ -682,11 +696,13 @@ export default function PresenceRoute() {
               type: 'text',
             });
             openUrl = `https://www.reddit.com/r/${sub}/submit?${params.toString()}`;
+            assistKind = 'reddit_self_post';
           }
         }
       } else if (draft.platform === 'x') {
         const params = new URLSearchParams({ text: draft.draft_body });
         openUrl = `https://x.com/intent/tweet?${params.toString()}`;
+        assistKind = 'x_intent';
       }
 
       if (!openUrl) {
@@ -695,14 +711,26 @@ export default function PresenceRoute() {
       }
       window.open(openUrl, '_blank', 'noopener,noreferrer');
 
-      // Compose toast message based on what actually happened.
-      const toastKey = imageDownloaded
-        ? copied
-          ? 'presence.feed.assist.copiedOpenedWithImage'
-          : 'presence.feed.assist.openedWithImageNoCopy'
-        : copied
-          ? 'presence.feed.assist.copiedAndOpened'
-          : 'presence.feed.assist.openedNoCopy';
+      // Compose toast message. Reddit comments are special: NO pre-fill
+      // possible (Reddit has no URL param for the comment textarea), only
+      // clipboard. Other kinds DO pre-fill the composer.
+      let toastKey: string;
+      if (assistKind === 'reddit_comment') {
+        toastKey = copied
+          ? imageDownloaded
+            ? 'presence.feed.assist.redditCommentWithImage'
+            : 'presence.feed.assist.redditComment'
+          : 'presence.feed.assist.redditCommentNoCopy';
+      } else {
+        // self-post / x intent: composer IS pre-filled
+        toastKey = imageDownloaded
+          ? copied
+            ? 'presence.feed.assist.copiedOpenedWithImage'
+            : 'presence.feed.assist.openedWithImageNoCopy'
+          : copied
+            ? 'presence.feed.assist.copiedAndOpened'
+            : 'presence.feed.assist.openedNoCopy';
+      }
       showToast(t(toastKey, { platform: draft.platform }));
 
       // Slight delay before prompting for URL so the new tab has time to
@@ -913,64 +941,73 @@ export default function PresenceRoute() {
     async (opts: { platform?: Platform; source_id?: string } = {}) => {
       if (scanBusy) return;
       setScanBusy(true);
+      // Wrap the whole job (POST + poll loop) in a tracked task so the
+      // sidebar Mascot pins on `sweeping` for the full 3-min scan instead
+      // of flashing briefly on each individual poll. Path is the kickoff
+      // endpoint — the classifier matches /scan → sweeping.
       try {
-        // Async scan: POST returns 202 + job_id, then we poll status until
-        // it's terminal (done | failed). The server walks Reddit + X for up
-        // to several minutes; the polling cadence stays cheap (one tiny GET
-        // every 3 s) and lets us refresh the feed mid-scan when drafts land.
-        const enqueued = await apiPost<{ job_id: string; status: ScanJobStatus }>(
-          '/api/presence/scan-now',
-          opts,
-        );
-        showToast(t('presence.scan.toastEnqueued'));
+        await trackTask('/api/presence/scan-now', async () => {
+          // Async scan: POST returns 202 + job_id, then we poll status until
+          // it's terminal (done | failed). The server walks Reddit + X for up
+          // to several minutes; the polling cadence stays cheap (one tiny GET
+          // every 3 s) and lets us refresh the feed mid-scan when drafts land.
+          const enqueued = await apiPost<{ job_id: string; status: ScanJobStatus }>(
+            '/api/presence/scan-now',
+            opts,
+          );
+          showToast(t('presence.scan.toastEnqueued'));
 
-        let job: ScanJob | null = null;
-        let lastDraftRefreshAt = 0;
-        for (let i = 0; i < 240; i += 1) {
-          // 240 polls × 3s = 12 min hard cap. Long enough for any realistic
-          // multi-source scan, short enough to bail if the worker hangs.
-          await new Promise((r) => setTimeout(r, 3_000));
-          job = await apiGet<ScanJob>(`/api/presence/scan-jobs/${enqueued.job_id}`);
+          let job: ScanJob | null = null;
+          let lastDraftRefreshAt = 0;
+          for (let i = 0; i < 240; i += 1) {
+            // 240 polls × 3s = 12 min hard cap. Long enough for any realistic
+            // multi-source scan, short enough to bail if the worker hangs.
+            await new Promise((r) => setTimeout(r, 3_000));
+            job = await apiGet<ScanJob>(`/api/presence/scan-jobs/${enqueued.job_id}`);
 
-          // Refresh the visible feed every ~10 s while scanning so new drafts
-          // pop in as they're persisted, instead of all-at-once at the end.
-          if (job.status === 'running' && Date.now() - lastDraftRefreshAt > 10_000) {
-            void loadFeed();
-            lastDraftRefreshAt = Date.now();
+            // Refresh the visible feed every ~10 s while scanning so new drafts
+            // pop in as they're persisted, instead of all-at-once at the end.
+            if (job.status === 'running' && Date.now() - lastDraftRefreshAt > 10_000) {
+              void loadFeed();
+              lastDraftRefreshAt = Date.now();
+            }
+            if (job.status === 'done' || job.status === 'failed') break;
           }
-          if (job.status === 'done' || job.status === 'failed') break;
-        }
 
-        if (!job || job.status === 'failed') {
-          setError(job?.error ?? 'scan_timeout');
-        } else if (job.status === 'done' && job.outcome) {
-          setLastScan(job.outcome);
-          // Distinguish three terminal cases so the user understands what
-          // happened. Otherwise "0 drafts created" reads as a silent failure
-          // when in fact the budget cap or TTL gate intentionally blocked work.
-          if (job.outcome.budget_exceeded) {
-            // Refresh budget config so the toast/error has the live numbers.
-            const cfg = await apiGet<{ todaySpendUsd: number; dailyBudgetUsd: number }>(
-              '/api/presence/scheduler-config',
-            ).catch(() => null);
-            setError(
-              t('presence.scan.budgetExceeded', {
-                spent: (cfg?.todaySpendUsd ?? 0).toFixed(4),
-                cap: (cfg?.dailyBudgetUsd ?? 0).toFixed(2),
-              }),
-            );
-          } else if (job.outcome.total_drafts_created === 0 && (job.outcome.skipped_ttl ?? 0) > 0) {
-            showToast(t('presence.scan.toastTtlSkipped', { n: job.outcome.skipped_ttl ?? 0 }));
-          } else {
-            showToast(
-              t('presence.scan.toastDone', {
-                n: job.outcome.total_drafts_created,
-                cost: job.outcome.total_cost_usd.toFixed(4),
-              }),
-            );
+          if (!job || job.status === 'failed') {
+            setError(job?.error ?? 'scan_timeout');
+          } else if (job.status === 'done' && job.outcome) {
+            setLastScan(job.outcome);
+            // Distinguish three terminal cases so the user understands what
+            // happened. Otherwise "0 drafts created" reads as a silent failure
+            // when in fact the budget cap or TTL gate intentionally blocked work.
+            if (job.outcome.budget_exceeded) {
+              // Refresh budget config so the toast/error has the live numbers.
+              const cfg = await apiGet<{ todaySpendUsd: number; dailyBudgetUsd: number }>(
+                '/api/presence/scheduler-config',
+              ).catch(() => null);
+              setError(
+                t('presence.scan.budgetExceeded', {
+                  spent: (cfg?.todaySpendUsd ?? 0).toFixed(4),
+                  cap: (cfg?.dailyBudgetUsd ?? 0).toFixed(2),
+                }),
+              );
+            } else if (
+              job.outcome.total_drafts_created === 0 &&
+              (job.outcome.skipped_ttl ?? 0) > 0
+            ) {
+              showToast(t('presence.scan.toastTtlSkipped', { n: job.outcome.skipped_ttl ?? 0 }));
+            } else {
+              showToast(
+                t('presence.scan.toastDone', {
+                  n: job.outcome.total_drafts_created,
+                  cost: job.outcome.total_cost_usd.toFixed(4),
+                }),
+              );
+            }
           }
-        }
-        await Promise.all([loadFeed(), loadSources()]);
+          await Promise.all([loadFeed(), loadSources()]);
+        });
       } catch (e) {
         setError(formatError(e));
       } finally {

@@ -1565,13 +1565,19 @@ export const DICT_FR = {
       },
       assist: {
         copiedAndOpened:
-          'Body copié dans le presse-papier, {platform} ouvert dans un nouvel onglet. Colle, poste, reviens logger l’URL.',
+          'Body copié dans le presse-papier, {platform} ouvert avec composer pré-rempli. Vérifie, clique Post, reviens logger l’URL.',
         openedNoCopy:
-          '{platform} ouvert dans un nouvel onglet. Copie le body à la main, colle, poste, reviens logger l’URL.',
+          '{platform} ouvert avec composer pré-rempli. Vérifie, clique Post, reviens logger l’URL.',
         copiedOpenedWithImage:
-          'Body copié + image sauvée dans Téléchargements, {platform} ouvert. Colle le body, drag le PNG dans le composer, poste, reviens logger l’URL.',
+          'Body copié + image sauvée dans Téléchargements, {platform} ouvert (composer pré-rempli). Drag le PNG dans le composer, poste, reviens logger l’URL.',
         openedWithImageNoCopy:
-          'Image sauvée dans Téléchargements, {platform} ouvert. Copie le body à la main + drag le PNG dans le composer.',
+          'Image sauvée dans Téléchargements, {platform} ouvert (composer pré-rempli). Drag le PNG dans le composer.',
+        redditComment:
+          '✂️ Body copié dans le presse-papier. Reddit ouvre le thread — clique « Add a comment » et fais Cmd+V (Reddit ne permet PAS de pré-remplir la box commentaire via URL). Poste, reviens logger l’URL.',
+        redditCommentWithImage:
+          '✂️ Body copié + image sauvée dans Téléchargements. Reddit ouvre le thread — Cmd+V dans la box commentaire + drag le PNG. Reddit ne permet pas le pré-remplissage natif.',
+        redditCommentNoCopy:
+          '⚠️ Clipboard refusé par le navigateur. Reddit ouvre le thread — copie le body à la main depuis le draft, paste dans la box commentaire.',
         noUrlAvailable:
           'Pas d’URL source capturée pour ce draft, impossible d’ouvrir dans le navigateur',
       },
