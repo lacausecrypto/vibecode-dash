@@ -1992,6 +1992,20 @@ export const DICT_EN = {
         bearerPlaceholder: 'Bearer token',
         usernamePlaceholder: 'username (optional)',
       },
+      xWrite: {
+        title: 'X (Twitter) post — OAuth 1.0a',
+        meta: 'Paste 4 keys from developer.x.com → your app → Keys and tokens tab. App needs "Read and write" permission (Edit then regenerate Access Token & Secret if not).',
+        connect: 'Connect X post',
+        connected: 'X post connected',
+        consumerKeyPlaceholder: 'API Key (consumer_key)',
+        consumerSecretPlaceholder: 'API Key Secret (consumer_secret)',
+        accessTokenPlaceholder: 'Access Token',
+        accessTokenSecretPlaceholder: 'Access Token Secret',
+        validationAllRequired:
+          'All 4 keys required (consumer key/secret + access token/secret). Generate them in developer.x.com → Keys and tokens.',
+        howto:
+          'Steps: 1) developer.x.com → your app → User authentication settings = "Read and write". 2) Keys and tokens tab → Consumer Keys → copy API Key + API Key Secret. 3) Authentication Tokens → "Generate" Access Token & Secret. All 4 keys stored in the OS keychain, never on disk.',
+      },
       phase2: {
         title: 'Phase 2 — scanners & drafters',
         body: 'Reddit/X scanners, Claude drafter with vault + persona, OpenRouter image pipeline and engagement poller land in Phase 2. V1 ships the data model, UI shell and cost accounting — you can already add sources and mark drafts posted/ignored manually to calibrate the feedback loop.',

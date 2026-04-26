@@ -1984,6 +1984,20 @@ export const DICT_ES = {
         bearerPlaceholder: 'Bearer token',
         usernamePlaceholder: 'username (opcional)',
       },
+      xWrite: {
+        title: 'X (Twitter) post — OAuth 1.0a',
+        meta: '4 claves a pegar desde developer.x.com → tu app → pestaña "Keys and tokens". Permiso "Read and write" requerido (Edit y regenerar Access Token & Secret si no).',
+        connect: 'Conectar X post',
+        connected: 'X post conectado',
+        consumerKeyPlaceholder: 'API Key (consumer_key)',
+        consumerSecretPlaceholder: 'API Key Secret (consumer_secret)',
+        accessTokenPlaceholder: 'Access Token',
+        accessTokenSecretPlaceholder: 'Access Token Secret',
+        validationAllRequired:
+          'Las 4 claves son requeridas (consumer key/secret + access token/secret). Genéralas en developer.x.com → Keys and tokens.',
+        howto:
+          'Pasos: 1) developer.x.com → tu app → User authentication settings = "Read and write". 2) Pestaña "Keys and tokens" → Consumer Keys → copiar API Key + API Key Secret. 3) Authentication Tokens → "Generate" Access Token & Secret. Las 4 claves se guardan en el keychain del SO, nunca en disco.',
+      },
       phase2: {
         title: 'Fase 2 — escáneres y drafters',
         body: 'Los escáneres Reddit/X, el drafter Claude con vault + persona, el pipeline de imágenes OpenRouter y el poller de engagement llegan en la Fase 2. V1 entrega el modelo de datos, el shell UI y la contabilidad de costes — ya puedes agregar fuentes y marcar drafts como publicados/ignorados manualmente para calibrar el feedback loop.',

@@ -4121,6 +4121,13 @@ function SettingsView({
           t={t}
         />
       </Section>
+
+      <Section
+        title={t('presence.settings.xWrite.title')}
+        meta={t('presence.settings.xWrite.meta')}
+      >
+        <XWriteConnect onError={onError} onToast={onToast} t={t} />
+      </Section>
     </div>
   );
 }
@@ -4771,6 +4778,151 @@ function XConnect({
           {busy ? t('common.saving') : t('presence.settings.x.connect')}
         </Button>
       </form>
+    </div>
+  );
+}
+
+/**
+ * The four OAuth 1.0a User-Context keys for posting to X. Independent of
+ * the read Bearer (which scans timelines / polls engagement) — either can
+ * be set without the other. Generated in one click in the developer
+ * portal under "Keys and tokens" → "Authentication Tokens" → "Generate".
+ *
+ * Wired against /api/presence/x/save-write-creds (POST) and
+ * /api/presence/x/write-creds (DELETE). The connected badge polls
+ * /api/presence/x/can-post on mount + after any save/delete so the UI
+ * reflects keychain reality, not just the form state.
+ */
+function XWriteConnect({
+  onError,
+  onToast,
+  t,
+}: {
+  onError: (e: unknown) => void;
+  onToast: (msg: string) => void;
+  t: Translator;
+}) {
+  const [canPost, setCanPost] = useState<boolean | null>(null);
+  const [consumerKey, setConsumerKey] = useState('');
+  const [consumerSecret, setConsumerSecret] = useState('');
+  const [accessToken, setAccessToken] = useState('');
+  const [accessTokenSecret, setAccessTokenSecret] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await apiGet<{ canPost: boolean }>('/api/presence/x/can-post');
+      setCanPost(res.canPost);
+    } catch (e) {
+      onError(e);
+      setCanPost(false);
+    }
+  }, [onError]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault();
+    if (
+      consumerKey.trim().length < 8 ||
+      consumerSecret.trim().length < 8 ||
+      accessToken.trim().length < 8 ||
+      accessTokenSecret.trim().length < 8
+    ) {
+      onError(new Error(t('presence.settings.xWrite.validationAllRequired')));
+      return;
+    }
+    setBusy(true);
+    try {
+      await apiPost('/api/presence/x/save-write-creds', {
+        consumerKey: consumerKey.trim(),
+        consumerSecret: consumerSecret.trim(),
+        accessToken: accessToken.trim(),
+        accessTokenSecret: accessTokenSecret.trim(),
+      });
+      // Wipe the form on success so the secrets don't linger in DOM.
+      setConsumerKey('');
+      setConsumerSecret('');
+      setAccessToken('');
+      setAccessTokenSecret('');
+      onToast(t('presence.settings.xWrite.connected'));
+      await refresh();
+    } catch (e) {
+      onError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDisconnect() {
+    if (!window.confirm(t('presence.settings.disconnectConfirm'))) return;
+    try {
+      await apiDelete('/api/presence/x/write-creds');
+      onToast(t('presence.settings.disconnected'));
+      await refresh();
+    } catch (e) {
+      onError(e);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2 text-[12px]">
+        <Chip tone={canPost ? 'success' : 'neutral'}>
+          {canPost === null
+            ? t('common.loading')
+            : canPost
+              ? t('presence.settings.connections.connected')
+              : t('presence.settings.connections.disconnected')}
+        </Chip>
+        {canPost ? (
+          <Button tone="ghost" onClick={handleDisconnect} className="!py-1 !text-[11px]">
+            {t('presence.settings.disconnect')}
+          </Button>
+        ) : null}
+      </div>
+      <form onSubmit={handleSave} className="grid grid-cols-1 gap-2 md:grid-cols-2">
+        <input
+          type="password"
+          value={consumerKey}
+          onChange={(e) => setConsumerKey(e.target.value)}
+          placeholder={t('presence.settings.xWrite.consumerKeyPlaceholder')}
+          className="!py-1 !text-[12px]"
+          autoComplete="off"
+        />
+        <input
+          type="password"
+          value={consumerSecret}
+          onChange={(e) => setConsumerSecret(e.target.value)}
+          placeholder={t('presence.settings.xWrite.consumerSecretPlaceholder')}
+          className="!py-1 !text-[12px]"
+          autoComplete="off"
+        />
+        <input
+          type="password"
+          value={accessToken}
+          onChange={(e) => setAccessToken(e.target.value)}
+          placeholder={t('presence.settings.xWrite.accessTokenPlaceholder')}
+          className="!py-1 !text-[12px]"
+          autoComplete="off"
+        />
+        <input
+          type="password"
+          value={accessTokenSecret}
+          onChange={(e) => setAccessTokenSecret(e.target.value)}
+          placeholder={t('presence.settings.xWrite.accessTokenSecretPlaceholder')}
+          className="!py-1 !text-[12px]"
+          autoComplete="off"
+        />
+        <div className="md:col-span-2 flex justify-end">
+          <Button tone="primary" type="submit" disabled={busy} className="!py-1 !text-[12px]">
+            {busy ? t('common.saving') : t('presence.settings.xWrite.connect')}
+          </Button>
+        </div>
+      </form>
+      <p className="text-[11px] text-[var(--text-faint)]">{t('presence.settings.xWrite.howto')}</p>
     </div>
   );
 }
