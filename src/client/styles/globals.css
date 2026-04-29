@@ -497,16 +497,21 @@ kbd {
   padding-bottom: 2px;
 }
 
-/* Note: we rely entirely on flex-wrap here, no flex-direction: column
-   fallback. A previous version forced column on < 640px to defeat the
-   Heatmap title bug (7-tab Segmented action exceeded the viewport),
-   but that also pushed narrow single-button actions (Sync now, Rescan
-   all) onto their own row unnecessarily. With flex-wrap alone:
-   - Wide actions (Segmented ~500 px) exceed the row → wrap to row 2.
-   - Narrow actions (~100 px) fit alongside the title and stay right.
-   The Section component's `min-w-0 flex-1` on the title block + the
-   action's `shrink-0` + `max-w-full overflow-x-auto` combine to make
-   this work without per-section overrides. */
+/* Targeted mobile stack — opt-in via the Section `actionWide` prop.
+   Used for sections whose action is a wide Segmented (Heatmap activité,
+   Stats Patterns, Insights filter) where forcing the action onto its
+   own row is the only way to keep the title legible. Narrow single-
+   button actions (Sync now, Rescan all) opt out and stay inline.
+
+   Why CSS-driven instead of a JS measurement: predictable, no layout
+   thrash, and the breakpoint matches the rest of the responsive
+   conventions in this stylesheet. */
+@media (max-width: 640px) {
+  .section-head-stack {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
 
 .section-title {
   font-size: 17px;

@@ -21,18 +21,33 @@ export function Section({
   title,
   meta,
   action,
+  actionWide,
   children,
   className,
 }: PropsWithChildren<{
   title?: ReactNode;
   meta?: ReactNode;
   action?: ReactNode;
+  /**
+   * Marks the action as "wide" (e.g. a Segmented with many tabs) so the
+   * head stacks the action below the title on narrow viewports instead
+   * of trying to fit them on one row. Default false: a single button or
+   * a narrow chip cluster stays inline with the title (the
+   * Sync now / Rescan all pattern, where stacking would look wrong).
+   *
+   * Why we can't auto-detect: a CSS-only "wrap when too wide" path looks
+   * tempting but max-width on the action defeats flex-wrap (clamps the
+   * flex-basis to the container so wrap never triggers), and removing
+   * the max-width lets the action overflow the section box. Per-section
+   * opt-in is the only deterministic fix.
+   */
+  actionWide?: boolean;
   className?: string;
 }>) {
   return (
     <section className={`section ${className || ''}`.trim()}>
       {title || meta || action ? (
-        <div className="section-head">
+        <div className={`section-head${actionWide ? ' section-head-stack' : ''}`}>
           {/* Title block: flex-1 + min-w-0 lets it own the available row
               width but ALSO shrink past content size when the action is
               wider — without min-w-0 it would block the action from ever
@@ -41,13 +56,12 @@ export function Section({
             {title ? <h2 className="section-title">{title}</h2> : null}
             {meta ? <div className="section-meta">{meta}</div> : null}
           </div>
-          {/* Action block: flex-shrink-0 keeps the action's natural width
-              (a Segmented with 7 tabs needs all its width to render). When
-              total width > container, section-head's flex-wrap kicks in
-              and the action wraps to its own row. max-w-full + overflow-
-              x-auto handle the still-wider case (tab strip > viewport) by
-              letting the action scroll internally instead of overflowing
-              the section box and breaking siblings. */}
+          {/* Action block: shrink-0 keeps the action's natural width.
+              max-w-full + overflow-x-auto cap the rendered width at the
+              parent so a wide tab strip scrolls internally instead of
+              breaking the section box. When `actionWide` is set the
+              parent's `section-head-stack` class flips to column on
+              narrow viewports so this lives on its own row. */}
           {action ? (
             <div className="flex max-w-full shrink-0 items-center gap-2 overflow-x-auto">
               {action}

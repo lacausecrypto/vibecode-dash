@@ -1088,6 +1088,7 @@ export default function OverviewRoute() {
       </Section>
 
       <Section
+        actionWide
         title={t('overview.heatmap.title')}
         meta={t('overview.heatmap.meta', {
           label: unifiedHeatmap.label,
@@ -1122,6 +1123,7 @@ export default function OverviewRoute() {
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.5fr_1fr]">
         <Section
+          actionWide
           title={t('overview.comparator.title')}
           meta={t('overview.comparator.subtitle', {
             modeTitle: vsData.config.title ?? '',
