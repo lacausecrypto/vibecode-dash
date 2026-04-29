@@ -310,6 +310,34 @@ export function registerGithubRoutes(app: Hono): void {
     return c.json({ rows: listNpmDaily(db, { from, to }) });
   });
 
+  /**
+   * Per-repo per-day npm downloads, for the heatmap's cumulative
+   * stacked-bars view. Same window contract as
+   * `/api/github/traffic/timeseries`: `?days=N` (default 120, capped 365).
+   * Returned rows are date-descending then download-descending so the UI
+   * can pick the top contributors at a glance during dev/debug, but the
+   * client doesn't depend on that ordering — it bags by date and repo.
+   */
+  app.get('/api/github/npm/daily-by-repo', (c) => {
+    const db = getDb();
+    const days = Math.min(365, Math.max(1, Number.parseInt(c.req.query('days') || '120', 10)));
+    const now = new Date();
+    const cutoff = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)),
+    )
+      .toISOString()
+      .slice(0, 10);
+    const rows = db
+      .query<{ date: string; repo: string; downloads: number }, [string]>(
+        `SELECT date, repo_name AS repo, downloads
+           FROM npm_downloads_daily
+          WHERE date >= ?
+          ORDER BY date DESC, downloads DESC`,
+      )
+      .all(cutoff);
+    return c.json({ rows });
+  });
+
   app.post('/api/github/npm/refresh', async (c) => {
     const db = getDb();
     const startedAt = Date.now();

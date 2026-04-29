@@ -497,17 +497,16 @@ kbd {
   padding-bottom: 2px;
 }
 
-/* Below sm, force a stack instead of relying on flex-wrap. Action
-   blocks (Segmented with 7 tabs) have a natural width that's larger
-   than typical mobile viewports — wrapping works in theory but the
-   shrink-0 + max-w-full + overflow-x-auto combo can race with flex
-   sizing in some browsers. Stacking removes the ambiguity. */
-@media (max-width: 640px) {
-  .section-head {
-    flex-direction: column;
-    align-items: stretch;
-  }
-}
+/* Note: we rely entirely on flex-wrap here, no flex-direction: column
+   fallback. A previous version forced column on < 640px to defeat the
+   Heatmap title bug (7-tab Segmented action exceeded the viewport),
+   but that also pushed narrow single-button actions (Sync now, Rescan
+   all) onto their own row unnecessarily. With flex-wrap alone:
+   - Wide actions (Segmented ~500 px) exceed the row → wrap to row 2.
+   - Narrow actions (~100 px) fit alongside the title and stay right.
+   The Section component's `min-w-0 flex-1` on the title block + the
+   action's `shrink-0` + `max-w-full overflow-x-auto` combine to make
+   this work without per-section overrides. */
 
 .section-title {
   font-size: 17px;

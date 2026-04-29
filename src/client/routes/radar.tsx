@@ -309,298 +309,431 @@ export default function RadarRoute() {
 
   const globalMode = !selectedProjectId;
 
+  // Project picker rendered as the top Section's action — replaces the
+  // bespoke <header> bar that didn't match the rest of the dashboard.
+  // The "open project" link sits in the meta line below so it stays
+  // visible without taking action-row width when a project is picked.
+  const projectPicker = (
+    <select
+      value={selectedProjectId || '__all__'}
+      onChange={(e) => switchProject(e.target.value === '__all__' ? null : e.target.value)}
+      className="!py-1 !text-[12px]"
+      aria-label={t('radar.allProjects')}
+    >
+      <option value="__all__">{t('radar.allProjects')}</option>
+      {projects.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.name}
+        </option>
+      ))}
+    </select>
+  );
+
+  // Compact run-summary line inserted into the Actions Section meta —
+  // surfaces the latest scan/generate cost+duration without taking a
+  // full row of toolbar real estate. Returns null when nothing to show
+  // so the meta falls back to the static description.
+  const lastRunMeta = lastRun ? (
+    <span className="flex flex-wrap items-center gap-1.5 text-[11px]">
+      <Chip tone={lastRun.run.ok ? 'success' : 'danger'}>
+        {t('radar.lastRun.chip', {
+          kind: lastRun.kind,
+          written: lastRun.written,
+          seconds: Math.round(lastRun.run.durationMs / 100) / 10,
+        })}
+      </Chip>
+      {lastRun.run.usage ? (
+        <span className="num text-[var(--text-dim)]">
+          {t('radar.lastRun.tokens', {
+            input: lastRun.run.usage.inputTokens,
+            output: lastRun.run.usage.outputTokens,
+          })}
+        </span>
+      ) : null}
+      {lastRun.run.model ? (
+        <span className="text-[var(--text-faint)]">· {lastRun.run.model}</span>
+      ) : null}
+    </span>
+  ) : null;
+
   return (
     <div className="flex flex-col gap-4">
-      {/* ============================ Header bar ============================ */}
-      <header className="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-1)] px-4 py-3">
-        <div className="flex items-center gap-3">
-          <span className="text-[15px] font-semibold tracking-tight text-[var(--text)]">
-            {t('radar.title')}
+      {/* ============== Header Section — title + project picker ==============
+          Standard <Section> layout matching every other dashboard page
+          (overview/projects/github/usage). Project picker lives in the
+          action slot; "open project" link is folded into the meta line
+          when a project is selected. Error/toast banners live inside so
+          they sit immediately under the title and don't stretch full-width
+          across the page like an unrelated banner would. */}
+      <Section
+        title={t('radar.title')}
+        meta={
+          <span className="flex flex-wrap items-center gap-1.5">
+            <span>{t('radar.subtitle')}</span>
+            {selectedProject ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <Link
+                  to={`/projects/${selectedProject.id}`}
+                  className="text-[var(--accent)] hover:underline"
+                >
+                  {t('radar.openProject')}
+                </Link>
+              </>
+            ) : null}
           </span>
-          <span className="text-[11px] text-[var(--text-dim)]">{t('radar.subtitle')}</span>
-        </div>
-        <div className="flex items-center gap-2 text-[12px]">
-          <select
-            value={selectedProjectId || '__all__'}
-            onChange={(e) => switchProject(e.target.value === '__all__' ? null : e.target.value)}
-            className="!py-1 !text-[12px]"
-          >
-            <option value="__all__">{t('radar.allProjects')}</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          {selectedProject ? (
-            <Link
-              to={`/projects/${selectedProject.id}`}
-              className="text-[var(--accent)] hover:underline"
-            >
-              {t('radar.openProject')}
-            </Link>
-          ) : null}
-        </div>
-      </header>
+        }
+        action={projectPicker}
+      >
+        {error ? <ErrorBanner>{error}</ErrorBanner> : null}
+        {toast ? (
+          <output className="block rounded-[var(--radius-sm)] border border-[rgba(48,209,88,0.35)] bg-[rgba(48,209,88,0.08)] px-3 py-1.5 text-[12px] text-[var(--text)]">
+            {toast}
+          </output>
+        ) : null}
+      </Section>
 
-      {/* ============================ Error / toast ============================ */}
-      {error ? <ErrorBanner>{error}</ErrorBanner> : null}
-      {toast ? (
-        <output className="block rounded-[var(--radius-sm)] border border-[rgba(48,209,88,0.35)] bg-[rgba(48,209,88,0.08)] px-3 py-1.5 text-[12px] text-[var(--text)]">
-          {toast}
-        </output>
-      ) : null}
-
-      {/* ============================ Stats strip ============================ */}
+      {/* ============== Project mode: KPI strip + actions + 2-col main ============== */}
       {!globalMode ? (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-          <Stat
-            label={t('radar.stats.competitors')}
-            value={competitors.length}
-            hint={t('radar.stats.sourceHint', {
-              agent: stats.agentCount,
-              manual: stats.manualCount,
-            })}
-          />
-          <Stat
-            label={t('radar.stats.marketGaps')}
-            value={stats.byType.market_gap}
-            tone={stats.byType.market_gap > 0 ? 'accent' : undefined}
-          />
-          <Stat
-            label={t('radar.stats.overlaps')}
-            value={stats.byType.overlap}
-            tone={stats.byType.overlap > 0 ? 'warn' : undefined}
-          />
-          <Stat
-            label={t('radar.stats.vaultEchoes')}
-            value={stats.byType.vault_echo}
-            tone={stats.byType.vault_echo > 0 ? 'success' : undefined}
-          />
-          <Stat
-            label={t('radar.stats.lastScan')}
-            value={stats.lastSeen > 0 ? relativeTime(stats.lastSeen) : '—'}
-            hint={
-              stats.lastSeen > 0
-                ? new Date(stats.lastSeen * 1000).toLocaleString()
-                : t('radar.stats.neverRan')
-            }
-          />
-        </div>
-      ) : null}
-
-      {/* ============================ Toolbar (project mode only) ============================ */}
-      {!globalMode ? (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              tone="primary"
-              onClick={() => void handleScan()}
-              disabled={scanning}
-              title={t('radar.actions.scanTitle')}
-            >
-              {scanning ? t('radar.actions.scanning') : t('radar.actions.scan')}
-              <kbd className="ml-1.5 text-[10px] opacity-60">
-                {formatBinding(bindings['radar.scan'])}
-              </kbd>
-            </Button>
-            <Button
-              tone="primary"
-              onClick={() => void handleGenerate()}
-              disabled={generating}
-              title={t('radar.actions.generateTitle')}
-            >
-              {generating ? t('radar.actions.generating') : t('radar.actions.generate')}
-              <kbd className="ml-1.5 text-[10px] opacity-60">
-                {formatBinding(bindings['radar.generate'])}
-              </kbd>
-            </Button>
-            <Button
-              tone="ghost"
-              onClick={() => setAddOpen((v) => !v)}
-              title={t('radar.actions.addManualTitle')}
-            >
-              {addOpen ? t('radar.actions.cancelAdd') : t('radar.actions.addManual')}
-            </Button>
-          </div>
-
-          {lastRun ? (
-            <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-dim)]">
-              <Chip tone={lastRun.run.ok ? 'success' : 'danger'}>
-                {t('radar.lastRun.chip', {
-                  kind: lastRun.kind,
-                  written: lastRun.written,
-                  seconds: Math.round(lastRun.run.durationMs / 100) / 10,
-                })}
-              </Chip>
-              {lastRun.run.usage ? (
-                <span className="num">
-                  {t('radar.lastRun.tokens', {
-                    input: lastRun.run.usage.inputTokens,
-                    output: lastRun.run.usage.outputTokens,
+        <>
+          {/* KPI strip — 4 main metrics. "Last scan" relegated to the
+              Section meta (right side) instead of being a 5th equal Stat,
+              so the eye lands on the 4 numbers that actually matter. */}
+          <Section
+            title={t('radar.kpi.title')}
+            meta={
+              <span className="flex flex-wrap items-center gap-1.5">
+                <span>
+                  {t('radar.stats.sourceHint', {
+                    agent: stats.agentCount,
+                    manual: stats.manualCount,
                   })}
                 </span>
-              ) : null}
-              {lastRun.run.model ? <span>{lastRun.run.model}</span> : null}
+                <span aria-hidden="true">·</span>
+                <span>
+                  {t('radar.stats.lastScan')}{' '}
+                  {stats.lastSeen > 0 ? (
+                    <span
+                      className="text-[var(--text)]"
+                      title={new Date(stats.lastSeen * 1000).toLocaleString()}
+                    >
+                      {relativeTime(stats.lastSeen)}
+                    </span>
+                  ) : (
+                    <span className="text-[var(--text-faint)]">{t('radar.stats.neverRan')}</span>
+                  )}
+                </span>
+              </span>
+            }
+          >
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <Stat
+                label={t('radar.stats.competitors')}
+                value={competitors.length}
+                hint={t('radar.stats.sourceHint', {
+                  agent: stats.agentCount,
+                  manual: stats.manualCount,
+                })}
+              />
+              <Stat
+                label={t('radar.stats.marketGaps')}
+                value={stats.byType.market_gap}
+                tone={stats.byType.market_gap > 0 ? 'accent' : undefined}
+              />
+              <Stat
+                label={t('radar.stats.overlaps')}
+                value={stats.byType.overlap}
+                tone={stats.byType.overlap > 0 ? 'warn' : undefined}
+              />
+              <Stat
+                label={t('radar.stats.vaultEchoes')}
+                value={stats.byType.vault_echo}
+                tone={stats.byType.vault_echo > 0 ? 'success' : undefined}
+              />
             </div>
-          ) : null}
-        </div>
-      ) : null}
+          </Section>
 
-      {/* ============================ Global summary (no-project mode) ============================ */}
-      {globalMode ? (
-        <GlobalSummary
-          summary={summary}
-          onPick={(id) => switchProject(id)}
-          t={t}
-          scanKey={formatBinding(bindings['radar.scan'])}
-        />
-      ) : null}
-
-      {/* ============================ Manual add form (disclosure) ============================ */}
-      {!globalMode && addOpen ? (
-        <form
-          onSubmit={handleAddManual}
-          className="grid grid-cols-1 gap-2 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 md:grid-cols-[minmax(160px,1fr)_minmax(180px,1fr)_minmax(200px,2fr)_auto]"
-        >
-          <input
-            ref={manualNameRef}
-            value={manualName}
-            onChange={(e) => setManualName(e.target.value)}
-            placeholder={t('radar.form.namePlaceholder')}
-            className="!py-1 !text-[12px]"
-            required
-          />
-          <input
-            type="url"
-            value={manualUrl}
-            onChange={(e) => setManualUrl(e.target.value)}
-            placeholder={t('radar.form.urlPlaceholder')}
-            className="!py-1 !text-[12px]"
-          />
-          <input
-            value={manualPitch}
-            onChange={(e) => setManualPitch(e.target.value)}
-            placeholder={t('radar.form.pitchPlaceholder')}
-            className="!py-1 !text-[12px]"
-          />
-          <Button tone="primary" type="submit" className="!py-1 !text-[12px]">
-            {t('radar.actions.add')}
-          </Button>
-        </form>
-      ) : null}
-
-      {/* ============================ Main 2-col ============================ */}
-      <div
-        className={`grid grid-cols-1 gap-4 ${
-          !globalMode ? 'xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]' : ''
-        }`}
-      >
-        {!globalMode ? (
+          {/* Actions Section — Scan + Generate as the section action,
+              last-run chip in the meta. The "Add manual" toggle lives
+              inside as a Card-wrapped disclosure: when open, the form
+              renders in the same Card so the visual frame matches the
+              rest of the dashboard's form treatment. */}
           <Section
-            title={t('radar.competitors.sectionTitle', { n: competitors.length })}
-            meta={t('radar.stats.sourceHint', {
-              agent: stats.agentCount,
-              manual: stats.manualCount,
-            })}
+            title={t('radar.actions.title')}
+            meta={lastRunMeta ?? t('radar.actions.meta')}
+            action={
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  tone="primary"
+                  onClick={() => void handleScan()}
+                  disabled={scanning}
+                  title={t('radar.actions.scanTitle')}
+                >
+                  {scanning ? t('radar.actions.scanning') : t('radar.actions.scan')}
+                  <kbd className="ml-1.5 text-[10px] opacity-60">
+                    {formatBinding(bindings['radar.scan'])}
+                  </kbd>
+                </Button>
+                <Button
+                  tone="primary"
+                  onClick={() => void handleGenerate()}
+                  disabled={generating}
+                  title={t('radar.actions.generateTitle')}
+                >
+                  {generating ? t('radar.actions.generating') : t('radar.actions.generate')}
+                  <kbd className="ml-1.5 text-[10px] opacity-60">
+                    {formatBinding(bindings['radar.generate'])}
+                  </kbd>
+                </Button>
+              </div>
+            }
+          >
+            <Card>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[12px] text-[var(--text-dim)]">
+                  {t('radar.actions.manualHint')}
+                </span>
+                <Button
+                  tone="ghost"
+                  onClick={() => setAddOpen((v) => !v)}
+                  title={t('radar.actions.addManualTitle')}
+                  className="!py-1 !text-[12px]"
+                >
+                  {addOpen ? t('radar.actions.cancelAdd') : t('radar.actions.addManual')}
+                </Button>
+              </div>
+              {addOpen ? (
+                <form
+                  onSubmit={handleAddManual}
+                  className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[minmax(160px,1fr)_minmax(180px,1fr)_minmax(200px,2fr)_auto]"
+                >
+                  <input
+                    ref={manualNameRef}
+                    value={manualName}
+                    onChange={(e) => setManualName(e.target.value)}
+                    placeholder={t('radar.form.namePlaceholder')}
+                    className="!py-1 !text-[12px]"
+                    required
+                  />
+                  <input
+                    type="url"
+                    value={manualUrl}
+                    onChange={(e) => setManualUrl(e.target.value)}
+                    placeholder={t('radar.form.urlPlaceholder')}
+                    className="!py-1 !text-[12px]"
+                  />
+                  <input
+                    value={manualPitch}
+                    onChange={(e) => setManualPitch(e.target.value)}
+                    placeholder={t('radar.form.pitchPlaceholder')}
+                    className="!py-1 !text-[12px]"
+                  />
+                  <Button tone="primary" type="submit" className="!py-1 !text-[12px]">
+                    {t('radar.actions.add')}
+                  </Button>
+                </form>
+              ) : null}
+            </Card>
+          </Section>
+
+          {/* 2-col: competitors (left) + insights (right). xl: side-by-side,
+              below xl: stacked. Each column is its own Section so titles
+              and Segmented controls stay visually anchored. */}
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <Section
+              title={t('radar.competitors.sectionTitle', { n: competitors.length })}
+              meta={t('radar.stats.sourceHint', {
+                agent: stats.agentCount,
+                manual: stats.manualCount,
+              })}
+              action={
+                <Segmented
+                  value={competitorsView}
+                  options={[
+                    { value: 'cards' as CompetitorsView, label: t('radar.competitors.viewCards') },
+                    {
+                      value: 'matrix' as CompetitorsView,
+                      label: t('radar.competitors.viewMatrix'),
+                    },
+                  ]}
+                  onChange={setCompetitorsView}
+                />
+              }
+            >
+              {competitors.length === 0 ? (
+                <Empty>
+                  <div className="flex flex-col items-center gap-2">
+                    <span>{t('radar.competitors.emptyHint')}</span>
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      <Button
+                        tone="primary"
+                        onClick={() => void handleScan()}
+                        disabled={scanning}
+                        className="!py-1 !text-[12px]"
+                      >
+                        {scanning ? t('radar.actions.scanning') : t('radar.actions.scan')}
+                      </Button>
+                      <Button
+                        tone="ghost"
+                        onClick={() => setAddOpen(true)}
+                        className="!py-1 !text-[12px]"
+                      >
+                        {t('radar.actions.addManual')}
+                      </Button>
+                    </div>
+                  </div>
+                </Empty>
+              ) : competitorsView === 'matrix' ? (
+                <FeaturesMatrix competitors={competitors} t={t} />
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {competitors.map((c) => (
+                    <CompetitorCard
+                      key={c.id}
+                      competitor={c}
+                      onDelete={() => void handleDeleteCompetitor(c.id, c.name)}
+                      t={t}
+                    />
+                  ))}
+                </div>
+              )}
+            </Section>
+
+            <Section
+              title={t('radar.insights.sectionTitle', { n: insights.length })}
+              meta={t('radar.insights.metaDetailed', {
+                gap: stats.byType.market_gap,
+                overlap: stats.byType.overlap,
+                echo: stats.byType.vault_echo,
+              })}
+              action={
+                <Segmented
+                  value={insightsFilter}
+                  options={[
+                    {
+                      value: 'pending' as InsightsFilter,
+                      label: t('radar.insights.filterPending'),
+                    },
+                    {
+                      value: 'explored' as InsightsFilter,
+                      label: t('radar.insights.filterExplored'),
+                    },
+                    {
+                      value: 'dismissed' as InsightsFilter,
+                      label: t('radar.insights.filterDismissed'),
+                    },
+                  ]}
+                  onChange={setInsightsFilter}
+                />
+              }
+            >
+              {insights.length === 0 ? (
+                <Empty>
+                  {insightsFilter === 'pending' ? (
+                    <div className="flex flex-col items-center gap-2">
+                      <span>{t('radar.insights.emptyPendingProject')}</span>
+                      <Button
+                        tone="primary"
+                        onClick={() => void handleGenerate()}
+                        disabled={generating}
+                        className="!py-1 !text-[12px]"
+                      >
+                        {generating ? t('radar.actions.generating') : t('radar.actions.generate')}
+                      </Button>
+                    </div>
+                  ) : insightsFilter === 'explored' ? (
+                    t('radar.insights.emptyExplored')
+                  ) : (
+                    t('radar.insights.emptyDismissed')
+                  )}
+                </Empty>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {insights.map((i) => (
+                    <InsightCard
+                      key={i.id}
+                      insight={i}
+                      projects={projects}
+                      showProject={false}
+                      filter={insightsFilter}
+                      onExplored={() => void handleInsightStatus(i.id, 'explored')}
+                      onDismissed={() => void handleInsightStatus(i.id, 'dismissed')}
+                      onRestore={() => void handleInsightStatus(i.id, 'pending')}
+                      onPromoted={showPromotedToast}
+                      t={t}
+                    />
+                  ))}
+                </div>
+              )}
+            </Section>
+          </div>
+        </>
+      ) : (
+        /* ============== Global mode: cross-project overview ==============
+           Stats + active projects table from GlobalSummary, then the
+           cross-project insights feed below. Both components are now
+           proper Sections (handled inside GlobalSummary + here). */
+        <>
+          <GlobalSummary
+            summary={summary}
+            onPick={(id) => switchProject(id)}
+            t={t}
+            scanKey={formatBinding(bindings['radar.scan'])}
+          />
+
+          <Section
+            title={t('radar.insights.sectionTitle', { n: insights.length })}
+            meta={t('radar.insights.metaGlobal')}
             action={
               <Segmented
-                value={competitorsView}
+                value={insightsFilter}
                 options={[
-                  { value: 'cards' as CompetitorsView, label: t('radar.competitors.viewCards') },
-                  { value: 'matrix' as CompetitorsView, label: t('radar.competitors.viewMatrix') },
+                  {
+                    value: 'pending' as InsightsFilter,
+                    label: t('radar.insights.filterPending'),
+                  },
+                  {
+                    value: 'explored' as InsightsFilter,
+                    label: t('radar.insights.filterExplored'),
+                  },
+                  {
+                    value: 'dismissed' as InsightsFilter,
+                    label: t('radar.insights.filterDismissed'),
+                  },
                 ]}
-                onChange={setCompetitorsView}
+                onChange={setInsightsFilter}
               />
             }
           >
-            {competitors.length === 0 ? (
+            {insights.length === 0 ? (
               <Empty>
-                {t('radar.competitors.emptyPrefix')}
-                <kbd>{formatBinding(bindings['radar.scan'])}</kbd>
-                {t('radar.competitors.emptyMiddle')}
-                <kbd>{t('radar.actions.addManual')}</kbd>
-                {t('radar.competitors.emptySuffix')}
+                {insightsFilter === 'pending'
+                  ? t('radar.insights.emptyPendingGlobal')
+                  : insightsFilter === 'explored'
+                    ? t('radar.insights.emptyExplored')
+                    : t('radar.insights.emptyDismissed')}
               </Empty>
-            ) : competitorsView === 'matrix' ? (
-              <FeaturesMatrix competitors={competitors} t={t} />
             ) : (
               <div className="flex flex-col gap-2">
-                {competitors.map((c) => (
-                  <CompetitorCard
-                    key={c.id}
-                    competitor={c}
-                    onDelete={() => void handleDeleteCompetitor(c.id, c.name)}
+                {insights.map((i) => (
+                  <InsightCard
+                    key={i.id}
+                    insight={i}
+                    projects={projects}
+                    showProject={true}
+                    filter={insightsFilter}
+                    onExplored={() => void handleInsightStatus(i.id, 'explored')}
+                    onDismissed={() => void handleInsightStatus(i.id, 'dismissed')}
+                    onRestore={() => void handleInsightStatus(i.id, 'pending')}
+                    onPromoted={showPromotedToast}
                     t={t}
                   />
                 ))}
               </div>
             )}
           </Section>
-        ) : null}
-
-        <Section
-          title={t('radar.insights.sectionTitle', { n: insights.length })}
-          meta={
-            globalMode
-              ? t('radar.insights.metaGlobal')
-              : t('radar.insights.metaDetailed', {
-                  gap: stats.byType.market_gap,
-                  overlap: stats.byType.overlap,
-                  echo: stats.byType.vault_echo,
-                })
-          }
-          action={
-            <Segmented
-              value={insightsFilter}
-              options={[
-                {
-                  value: 'pending' as InsightsFilter,
-                  label: t('radar.insights.filterPending'),
-                },
-                {
-                  value: 'explored' as InsightsFilter,
-                  label: t('radar.insights.filterExplored'),
-                },
-                {
-                  value: 'dismissed' as InsightsFilter,
-                  label: t('radar.insights.filterDismissed'),
-                },
-              ]}
-              onChange={setInsightsFilter}
-            />
-          }
-        >
-          {insights.length === 0 ? (
-            <Empty>
-              {insightsFilter === 'pending'
-                ? globalMode
-                  ? t('radar.insights.emptyPendingGlobal')
-                  : t('radar.insights.emptyPendingProject')
-                : insightsFilter === 'explored'
-                  ? t('radar.insights.emptyExplored')
-                  : t('radar.insights.emptyDismissed')}
-            </Empty>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {insights.map((i) => (
-                <InsightCard
-                  key={i.id}
-                  insight={i}
-                  projects={projects}
-                  showProject={globalMode}
-                  filter={insightsFilter}
-                  onExplored={() => void handleInsightStatus(i.id, 'explored')}
-                  onDismissed={() => void handleInsightStatus(i.id, 'dismissed')}
-                  onRestore={() => void handleInsightStatus(i.id, 'pending')}
-                  onPromoted={showPromotedToast}
-                  t={t}
-                />
-              ))}
-            </div>
-          )}
-        </Section>
-      </div>
+        </>
+      )}
     </div>
   );
 }
@@ -644,37 +777,42 @@ function GlobalSummary({
 
   return (
     <>
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
-        <Stat label={t('radar.stats.activeProjects')} value={totals.projects} />
-        <Stat label={t('radar.stats.competitors')} value={totals.competitors} />
-        <Stat
-          label={t('radar.stats.pending')}
-          value={totals.pending}
-          tone={totals.pending > 0 ? 'accent' : undefined}
-        />
-        <Stat
-          label={t('radar.stats.marketGaps')}
-          value={totals.market_gap}
-          tone={totals.market_gap > 0 ? 'accent' : undefined}
-        />
-        <Stat
-          label={t('radar.stats.overlaps')}
-          value={totals.overlap}
-          tone={totals.overlap > 0 ? 'warn' : undefined}
-        />
-        <Stat
-          label={t('radar.stats.vaultEchoes')}
-          value={totals.vault_echo}
-          tone={totals.vault_echo > 0 ? 'success' : undefined}
-        />
-      </div>
+      {/* Stats Section — wraps the KPI grid in a proper titled Section
+          (was orphan markup before). Same 6-stat layout but framed
+          consistently with the rest of the dashboard. */}
+      <Section title={t('radar.global.statsTitle')} meta={t('radar.global.statsMeta')}>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
+          <Stat label={t('radar.stats.activeProjects')} value={totals.projects} />
+          <Stat label={t('radar.stats.competitors')} value={totals.competitors} />
+          <Stat
+            label={t('radar.stats.pending')}
+            value={totals.pending}
+            tone={totals.pending > 0 ? 'accent' : undefined}
+          />
+          <Stat
+            label={t('radar.stats.marketGaps')}
+            value={totals.market_gap}
+            tone={totals.market_gap > 0 ? 'accent' : undefined}
+          />
+          <Stat
+            label={t('radar.stats.overlaps')}
+            value={totals.overlap}
+            tone={totals.overlap > 0 ? 'warn' : undefined}
+          />
+          <Stat
+            label={t('radar.stats.vaultEchoes')}
+            value={totals.vault_echo}
+            tone={totals.vault_echo > 0 ? 'success' : undefined}
+          />
+        </div>
+      </Section>
 
       <Section
         title={t('radar.global.activeSection', { n: summary.length })}
         meta={t('radar.global.activeMeta')}
       >
         <div className="overflow-x-auto rounded-[var(--radius-sm)] border border-[var(--border)]">
-          <table className="w-full border-collapse text-[12px]">
+          <table className="w-full min-w-[640px] border-collapse text-[12px]">
             <thead>
               <tr className="bg-[var(--surface-2)] text-[var(--text-mute)]">
                 <th className="px-2 py-1.5 text-left font-medium">
@@ -719,6 +857,9 @@ function GlobalSummary({
                 <th className="px-2 py-1.5 text-right font-medium">
                   {t('radar.global.colLastScan')}
                 </th>
+                {/* Empty header above the row chevron so column count
+                    stays consistent with tbody rows. */}
+                <th aria-hidden="true" className="w-6" />
               </tr>
             </thead>
             <tbody>
@@ -733,7 +874,7 @@ function GlobalSummary({
                     }
                   }}
                   tabIndex={0}
-                  className="cursor-pointer border-t border-[var(--border)] hover:bg-[var(--surface-2)] focus:bg-[var(--surface-2)] focus:outline-none"
+                  className="group cursor-pointer border-t border-[var(--border)] hover:bg-[var(--surface-2)] focus:bg-[var(--surface-2)] focus:outline-none"
                 >
                   <td className="px-2 py-1.5">
                     <span className="font-medium text-[var(--text)]">{r.project_name}</span>
@@ -767,6 +908,15 @@ function GlobalSummary({
                   </td>
                   <td className="px-2 py-1.5 text-right num text-[var(--text-faint)]">
                     {r.last_seen ? relativeTime(r.last_seen) : '—'}
+                  </td>
+                  {/* Chevron — visual signal that the row is navigable.
+                      Faint by default, brightens on row hover via `group`
+                      so it doesn't add noise on a long table at rest. */}
+                  <td
+                    aria-hidden="true"
+                    className="w-6 px-1 text-right text-[14px] text-[var(--text-faint)] transition-colors group-hover:text-[var(--text-dim)]"
+                  >
+                    ›
                   </td>
                 </tr>
               ))}
@@ -866,8 +1016,12 @@ function CompetitorCard({
     ? competitor.url.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '')
     : null;
 
+  // The `group` class on the outer Card lets us scope hover-reveal of
+  // the delete button: idle = invisible (no UI noise on a list of 20+
+  // cards), hover/focus-within = visible. Touch users still get it via
+  // focus-within once they tap any field. Always reachable by keyboard.
   return (
-    <Card className="!p-3">
+    <Card className="group !p-3">
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 flex-col gap-0.5">
           <div className="flex flex-wrap items-center gap-2">
@@ -904,7 +1058,7 @@ function CompetitorCard({
         <button
           type="button"
           onClick={onDelete}
-          className="-mr-1 -mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[15px] leading-none text-[var(--text-faint)] hover:bg-[rgba(255,69,58,0.12)] hover:text-[var(--danger)]"
+          className="-mr-1 -mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[15px] leading-none text-[var(--text-faint)] opacity-0 transition-opacity hover:bg-[rgba(255,69,58,0.12)] hover:text-[var(--danger)] focus-visible:opacity-100 group-hover:opacity-100"
           aria-label={t('radar.competitors.deleteLabel', { name: competitor.name })}
           title={t('radar.competitors.deleteTitle')}
         >
@@ -1038,23 +1192,32 @@ function InsightCard({
         </div>
       ) : null}
 
-      <footer className="mt-3 flex flex-wrap items-center justify-end gap-1 border-t border-[var(--border)] pt-2">
+      <footer className="mt-3 flex flex-wrap items-center justify-end gap-1.5 border-t border-[var(--border)] pt-2">
         {filter === 'pending' ? (
           <>
+            {/* Promote = primary action: writes Concepts/radar/<slug>.md
+                in the vault (irreversible-feeling). Mark explored / dismiss
+                are secondary triage actions on the same row but visually
+                quieter so the eye lands on Promote first. */}
             <Button
               tone="ghost"
+              onClick={onDismissed}
+              className="!py-1 !text-[11px] !text-[var(--text-dim)] hover:!text-[#ff453a]"
+              title={t('radar.insights.markDismissed')}
+            >
+              {t('radar.insights.markDismissed')}
+            </Button>
+            <Button tone="ghost" onClick={onExplored} className="!py-1 !text-[11px]">
+              {t('radar.insights.markExplored')}
+            </Button>
+            <Button
+              tone="primary"
               onClick={() => void handlePromote()}
               disabled={promoting}
               className="!py-1 !text-[11px]"
               title={t('radar.insights.promoteTitle')}
             >
               {promoting ? t('radar.insights.promoteBusy') : t('radar.insights.promote')}
-            </Button>
-            <Button tone="ghost" onClick={onExplored} className="!py-1 !text-[11px]">
-              {t('radar.insights.markExplored')}
-            </Button>
-            <Button tone="ghost" onClick={onDismissed} className="!py-1 !text-[11px]">
-              {t('radar.insights.markDismissed')}
             </Button>
           </>
         ) : (

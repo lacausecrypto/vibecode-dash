@@ -16,6 +16,7 @@ import {
   setBinding,
   subscribe,
 } from '../lib/shortcuts';
+import { PresenceSettingsPanel } from './settings/PresencePanel';
 
 type SubscriptionPlan = {
   plan: string;
@@ -75,13 +76,14 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-type TabId = 'general' | 'data' | 'costs' | 'display' | 'logs' | 'shortcuts' | 'about';
+type TabId = 'general' | 'data' | 'costs' | 'display' | 'presence' | 'logs' | 'shortcuts' | 'about';
 
 const TAB_DEFS: Array<{ id: TabId; labelKey: string; hint?: string }> = [
   { id: 'general', labelKey: 'settings.tabs.general' },
   { id: 'data', labelKey: 'settings.tabs.data' },
   { id: 'costs', labelKey: 'settings.tabs.costs' },
   { id: 'display', labelKey: 'settings.tabs.display' },
+  { id: 'presence', labelKey: 'settings.tabs.presence' },
   { id: 'logs', labelKey: 'settings.tabs.logs' },
   { id: 'shortcuts', labelKey: 'settings.tabs.shortcuts' },
   { id: 'about', labelKey: 'settings.tabs.about' },
@@ -403,6 +405,9 @@ function SettingsPanels({
   }
   if (active === 'display') {
     return <PanelDisplay settings={settings} update={update} />;
+  }
+  if (active === 'presence') {
+    return <PresenceSettingsPanel />;
   }
   if (active === 'logs') {
     return <SyncLogSection />;

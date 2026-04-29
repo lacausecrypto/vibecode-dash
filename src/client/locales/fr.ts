@@ -537,7 +537,12 @@ export const DICT_FR = {
       totalViews: 'views',
       totalClones: 'clones',
       viewGrid: 'Grille',
-      viewLine: 'Courbe',
+      viewLine: 'Cumul',
+      bucketDay: 'Jour',
+      bucketWeek: 'Semaine',
+      bucketBiweekly: '14 j',
+      bucketMonth: 'Mois',
+      bucketQuarter: 'Trim.',
     },
     syncLog: {
       title: 'Refresh log',
@@ -556,6 +561,8 @@ export const DICT_FR = {
       onlyTraffic: 'trafic seul',
       empty: 'Aucun repo ne correspond aux filtres.',
       daysWindow: '{n} j',
+      expand: 'Voir les {n} autres',
+      collapse: 'Réduire',
     },
     repos: {
       title: 'Repos',
@@ -576,6 +583,8 @@ export const DICT_FR = {
       commitsCell: 'Commits',
       uniques: '{n} uniques',
       pushedRelative: 'push {rel}',
+      expand: 'Voir les {n} autres',
+      collapse: 'Réduire',
     },
     syncBanner: {
       pending: 'Sync en cours — heatmap · repos · trafic',
@@ -1288,6 +1297,7 @@ export const DICT_FR = {
       data: 'Données',
       costs: 'Coûts',
       display: 'Affichage',
+      presence: 'Présence',
       logs: 'Logs',
       shortcuts: 'Raccourcis',
       about: 'À propos',
@@ -1424,6 +1434,9 @@ export const DICT_FR = {
     },
 
     actions: {
+      title: 'Actions radar',
+      meta: 'Scan automatique via Claude CLI · génération d’insights · ajout manuel',
+      manualHint: 'Connais déjà un concurrent ? Ajoute-le sans relancer un scan complet.',
       scanTitle: 'Scanner les concurrents via Claude CLI (⌨ S)',
       scanning: 'Scan en cours…',
       scan: 'Scanner concurrents',
@@ -1434,6 +1447,11 @@ export const DICT_FR = {
       cancelAdd: '× Annuler',
       addManual: '+ Ajouter manuel',
       add: 'Ajouter',
+    },
+
+    kpi: {
+      title: 'État du radar',
+      meta: 'Concurrents et types d’insights pour ce projet',
     },
 
     lastRun: {
@@ -1461,6 +1479,7 @@ export const DICT_FR = {
       sectionTitle: 'Concurrents · {n}',
       viewCards: 'Cards',
       viewMatrix: 'Matrix',
+      emptyHint: 'Aucun concurrent enregistré pour ce projet.',
       emptyPrefix: 'Aucun concurrent. Lance ',
       emptyMiddle: ' (Scan) ou ',
       emptySuffix: '.',
@@ -1490,6 +1509,8 @@ export const DICT_FR = {
     },
 
     global: {
+      statsTitle: 'Vue d\u2019ensemble',
+      statsMeta: 'agr\u00e9gats cross-projets',
       emptyTitle: 'Aucun projet n\u2019a encore de radar',
       emptyMeta: 'zéro concurrent · zéro insight',
       emptyBody:
@@ -1535,7 +1556,6 @@ export const DICT_FR = {
       feed: 'Feed',
       sources: 'Sources',
       stats: 'Stats',
-      settings: 'Paramètres',
     },
 
     feed: {
@@ -1944,6 +1964,17 @@ export const DICT_FR = {
       disconnect: 'Déconnecter',
       disconnected: 'Déconnecté',
       disconnectConfirm: 'Déconnecter ? Le secret sera effacé du Keychain.',
+      groups: {
+        automation: 'Automatisation',
+        learning: 'Apprentissage & persona',
+        connections: 'Connexions externes',
+      },
+      hero: {
+        title: 'État des connexions',
+        summary: '{connected}/{total} services connectés',
+        xRead: 'X lecture',
+        xWrite: 'X écriture',
+      },
       connections: {
         title: 'Connexions plateformes',
         meta: 'Les secrets vivent dans le Keychain macOS — le dashboard ne garde qu’une référence.',

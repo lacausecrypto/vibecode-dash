@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Heatmap } from '../components/Heatmap';
-import { HeatmapLine } from '../components/HeatmapLine';
+import { HeatmapStackedBars } from '../components/HeatmapStackedBars';
 import {
   Button,
   Card,
@@ -14,6 +14,7 @@ import {
   Toolbar,
 } from '../components/ui';
 import { apiGet, apiPost } from '../lib/api';
+import type { StackedDailyRow } from '../lib/cumulStacks';
 import { type Locale, dateLocale, numberLocale, useTranslation } from '../lib/i18n';
 
 type HeatmapDay = { date: string; count: number; color?: string | null };
@@ -306,40 +307,81 @@ export default function GithubRoute() {
   const [syncing, setSyncing] = useState(false);
   const [syncBanner, setSyncBanner] = useState<SyncBannerState>({ kind: 'idle' });
   const [, setNowTick] = useState(0);
-  const [repoSort, setRepoSort] = useState<RepoSort>('pushed');
+  // Default to 'stars' so the most starred repos lead the module — matches
+  // the user's expectation that the Repos section opens on the top 3 stars,
+  // mirroring the sparklines module's collapsed-by-default UX.
+  const [repoSort, setRepoSort] = useState<RepoSort>('stars');
+  // Collapsed by default, mirrors the sparklines module: 3 visible rows,
+  // expand to 30. Cap of 30 keeps DOM bounded on big accounts.
+  const [reposExpanded, setReposExpanded] = useState(false);
   const [query, setQuery] = useState('');
   const [sparkMetric, setSparkMetric] = useState<SparkMetric>('clones');
   const [sparkWindowDays, setSparkWindowDays] = useState<number>(30);
   const [sparkSort, setSparkSort] = useState<SparkSort>('cumulative');
   const [sparkFilter, setSparkFilter] = useState('');
   const [sparkOnlyTraffic, setSparkOnlyTraffic] = useState(true);
+  // Collapsed by default — module shows only the top 3 to keep the page
+  // scannable. The user clicks "Voir les autres" to reveal the long tail
+  // (capped at 30 below). The toggle is intentionally NOT persisted across
+  // reloads: a fresh page should start clean, the user re-opens if useful.
+  const [sparkExpanded, setSparkExpanded] = useState(false);
   const [heatmapMetric, setHeatmapMetric] = useState<'contrib' | 'views' | 'clones' | 'npm'>(
     'contrib',
   );
   const [heatmapView, setHeatmapView] = useState<'grid' | 'line'>('grid');
+  // Granularity for the cumulative stacked-bars view. Defaults to month —
+  // 12 columns reads cleanly. 'day' is dense (365 thin bars) but useful for
+  // recent activity; 'week' (~52 bars) catches the weekly cadence; 'biweekly'
+  // (14 j, ~26 bars) smooths it; 'quarter' compresses to 4 chunky bars.
+  const [heatmapBucket, setHeatmapBucket] = useState<
+    'day' | 'week' | 'biweekly' | 'month' | 'quarter'
+  >('month');
   const [npmDaily, setNpmDaily] = useState<Array<{ date: string; count: number }>>([]);
+  // Per-repo per-day npm downloads for the cumulative stacked-bars view.
+  // Loaded in parallel with the other GitHub fetches; falls back to the
+  // aggregate `npmDaily` shape (single "all" series) when this is empty
+  // (e.g. fresh install before the npm sync ran).
+  const [npmDailyByRepo, setNpmDailyByRepo] = useState<
+    Array<{ date: string; repo: string; downloads: number }>
+  >([]);
   const [deltaPeriod, setDeltaPeriod] = useState<'day' | 'week' | 'month' | 'all'>('week');
 
   async function load() {
     try {
       setError(null);
-      const [heatmapData, reposData, trafficData, trafficSeriesData, statusData, npmDailyData] =
-        await Promise.all([
-          apiGet<HeatmapResponse>('/api/github/heatmap'),
-          apiGet<Repo[]>('/api/github/repos'),
-          apiGet<TrafficResponse>('/api/github/traffic?days=14'),
-          apiGet<TrafficTimeseriesResponse>('/api/github/traffic/timeseries?days=120'),
-          apiGet<GithubStatus>('/api/github/status'),
-          apiGet<{ rows: Array<{ date: string; downloads: number }> }>(
-            '/api/github/npm/daily',
-          ).catch(() => ({ rows: [] })),
-        ]);
+      const [
+        heatmapData,
+        reposData,
+        trafficData,
+        trafficSeriesData,
+        statusData,
+        npmDailyData,
+        npmByRepoData,
+      ] = await Promise.all([
+        apiGet<HeatmapResponse>('/api/github/heatmap'),
+        apiGet<Repo[]>('/api/github/repos'),
+        apiGet<TrafficResponse>('/api/github/traffic?days=14'),
+        // 365 days so the annual cumulative-by-repo stacked bars (Courbe view)
+        // covers every month of the displayed year, not just the recent quarter.
+        apiGet<TrafficTimeseriesResponse>('/api/github/traffic/timeseries?days=365'),
+        apiGet<GithubStatus>('/api/github/status'),
+        apiGet<{ rows: Array<{ date: string; downloads: number }> }>('/api/github/npm/daily').catch(
+          () => ({ rows: [] }),
+        ),
+        // Per-repo per-day npm for the cumulative stacked bars. Same window
+        // as traffic timeseries. Failure is non-fatal: the chart silently
+        // falls back to the single-key "all" series built from npmDaily.
+        apiGet<{ rows: Array<{ date: string; repo: string; downloads: number }> }>(
+          '/api/github/npm/daily-by-repo?days=365',
+        ).catch(() => ({ rows: [] })),
+      ]);
       setHeatmap(heatmapData);
       setRepos(reposData);
       setTraffic(trafficData);
       setTrafficSeries(trafficSeriesData);
       setStatus(statusData);
       setNpmDaily(npmDailyData.rows.map((r) => ({ date: r.date, count: r.downloads })));
+      setNpmDailyByRepo(npmByRepoData.rows);
     } catch (e) {
       setError(String(e));
     }
@@ -691,6 +733,65 @@ export default function GithubRoute() {
     };
   }, [trafficSeries, heatmap?.year, npmDaily]);
 
+  /**
+   * Per-repo per-day series for the cumulative stacked-bars view (Courbe).
+   * Only views / clones expose a per-repo breakdown via the timeseries
+   * endpoint. Contribs (heatmap) and aggregated npm/daily collapse to a
+   * single synthetic "all" key — the stacked component degrades to a
+   * monochrome column histogram in that case, which still reads correctly.
+   */
+  const trafficStackedDaily = useMemo(() => {
+    const views: StackedDailyRow[] = [];
+    const clones: StackedDailyRow[] = [];
+    if (trafficSeries) {
+      const viewsBag = new Map<string, Record<string, number>>();
+      const clonesBag = new Map<string, Record<string, number>>();
+      for (const row of trafficSeries.rows) {
+        if (row.viewsCount && row.viewsCount > 0) {
+          const m = viewsBag.get(row.date) ?? {};
+          m[row.repo] = (m[row.repo] ?? 0) + Number(row.viewsCount);
+          viewsBag.set(row.date, m);
+        }
+        if (row.clonesCount && row.clonesCount > 0) {
+          const m = clonesBag.get(row.date) ?? {};
+          m[row.repo] = (m[row.repo] ?? 0) + Number(row.clonesCount);
+          clonesBag.set(row.date, m);
+        }
+      }
+      for (const [date, values] of viewsBag) views.push({ date, values });
+      for (const [date, values] of clonesBag) clones.push({ date, values });
+      views.sort((a, b) => a.date.localeCompare(b.date));
+      clones.sort((a, b) => a.date.localeCompare(b.date));
+    }
+    const contribDaily: StackedDailyRow[] = (heatmap?.days ?? [])
+      .filter((d) => d.count > 0)
+      .map((d) => ({ date: d.date, values: { all: d.count } }));
+
+    // npm: prefer the per-repo breakdown when available so the cumulative
+    // stacked bars colour-segment by package. Falls back to the aggregated
+    // single-key "all" series from `npmDaily` when the per-repo endpoint
+    // returned [] (typical on a fresh install before the npm sync ran).
+    let npmStackedDaily: StackedDailyRow[];
+    if (npmDailyByRepo.length > 0) {
+      const npmBag = new Map<string, Record<string, number>>();
+      for (const row of npmDailyByRepo) {
+        if (!row.downloads || row.downloads <= 0) continue;
+        const m = npmBag.get(row.date) ?? {};
+        m[row.repo] = (m[row.repo] ?? 0) + Number(row.downloads);
+        npmBag.set(row.date, m);
+      }
+      npmStackedDaily = [...npmBag.entries()]
+        .map(([date, values]) => ({ date, values }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+    } else {
+      npmStackedDaily = npmDaily
+        .filter((d) => d.count > 0)
+        .map((d) => ({ date: d.date, values: { all: d.count } }));
+    }
+
+    return { views, clones, contrib: contribDaily, npm: npmStackedDaily };
+  }, [trafficSeries, heatmap?.days, npmDaily, npmDailyByRepo]);
+
   const sparkRows = useMemo(() => {
     const normalized = sparkFilter.trim().toLowerCase();
     const latestDate =
@@ -1034,48 +1135,87 @@ export default function GithubRoute() {
                 ]}
                 onChange={setHeatmapMetric}
               />
-              <Segmented<'grid' | 'line'>
-                value={heatmapView}
-                options={[
-                  { value: 'grid', label: t('github.heatmap.viewGrid') },
-                  { value: 'line', label: t('github.heatmap.viewLine') },
-                ]}
-                onChange={setHeatmapView}
-              />
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Granularity picker for the cumulative stacked-bars view.
+                    Hidden when grid is selected since the grid is always daily. */}
+                {heatmapView === 'line' ? (
+                  <Segmented<'day' | 'week' | 'biweekly' | 'month' | 'quarter'>
+                    value={heatmapBucket}
+                    options={[
+                      { value: 'day', label: t('github.heatmap.bucketDay') },
+                      { value: 'week', label: t('github.heatmap.bucketWeek') },
+                      { value: 'biweekly', label: t('github.heatmap.bucketBiweekly') },
+                      { value: 'month', label: t('github.heatmap.bucketMonth') },
+                      { value: 'quarter', label: t('github.heatmap.bucketQuarter') },
+                    ]}
+                    onChange={setHeatmapBucket}
+                  />
+                ) : null}
+                <Segmented<'grid' | 'line'>
+                  value={heatmapView}
+                  options={[
+                    { value: 'grid', label: t('github.heatmap.viewGrid') },
+                    { value: 'line', label: t('github.heatmap.viewLine') },
+                  ]}
+                  onChange={setHeatmapView}
+                />
+              </div>
             </div>
             {(() => {
-              // Single source of (days, palette, label) — both views share the
-              // exact same input so switching grid↔line never diverges.
+              // Single source of (days, palette, label, stackedDaily) — both
+              // views share the exact same input so switching grid↔line never
+              // diverges. `stackedDaily` is only consumed by the cumulative
+              // bars view; the grid view ignores it.
               const config =
                 heatmapMetric === 'contrib'
                   ? {
                       days: heatmap?.days || [],
+                      stackedDaily: trafficStackedDaily.contrib,
                       palette: 'github' as const,
                       label: t('github.heatmap.totalContribs'),
                     }
                   : heatmapMetric === 'views'
                     ? {
                         days: trafficHeatmapDays.views,
+                        stackedDaily: trafficStackedDaily.views,
                         palette: 'cyan' as const,
                         label: t('github.heatmap.totalViews'),
                       }
                     : heatmapMetric === 'clones'
                       ? {
                           days: trafficHeatmapDays.clones,
+                          stackedDaily: trafficStackedDaily.clones,
                           palette: 'amber' as const,
                           label: t('github.heatmap.totalClones'),
                         }
                       : {
                           days: trafficHeatmapDays.npm,
+                          stackedDaily: trafficStackedDaily.npm,
                           palette: 'magenta' as const,
                           label: 'downloads',
                         };
-              return heatmapView === 'grid' ? (
-                <Heatmap days={config.days} palette={config.palette} totalLabel={config.label} />
-              ) : (
-                <HeatmapLine
-                  days={config.days}
-                  palette={config.palette}
+              if (heatmapView === 'grid') {
+                return (
+                  <Heatmap days={config.days} palette={config.palette} totalLabel={config.label} />
+                );
+              }
+              // Cumulative stacked bars per project, granularity from the
+              // user's bucket toggle. The X axis runs from Jan 1 of the
+              // displayed year to TODAY (clamped) — past today is the future,
+              // we don't render forward-extrapolated buckets that would just
+              // carry the cumul flat and look like duplicate columns.
+              const year = heatmap?.year || new Date().getUTCFullYear();
+              const todayIso = new Date().toISOString().slice(0, 10);
+              const yearEnd = `${year}-12-31`;
+              const toDate = todayIso < yearEnd ? todayIso : yearEnd;
+              return (
+                <HeatmapStackedBars
+                  daily={config.stackedDaily}
+                  fromDate={`${year}-01-01`}
+                  toDate={toDate}
+                  groupBy={heatmapBucket}
+                  cumulative
+                  scheme={config.palette}
                   totalLabel={config.label}
                 />
               );
@@ -1144,25 +1284,59 @@ export default function GithubRoute() {
             </label>
           </Toolbar>
 
-          <div className="mt-3 grid grid-cols-1 gap-1 md:grid-cols-2 xl:grid-cols-3">
-            {sparkRows.rows.slice(0, 30).map((row, index) => (
-              <RepoSparklineCard
-                key={row.repoName}
-                rank={index + 1}
-                repoName={row.repoName}
-                repoUrl={row.repoUrl}
-                values={row.values}
-                metric={sparkMetric}
-                sort={sparkSort}
-                windowDays={sparkWindowDays}
-                windowTotal={row.windowTotal}
-                cumulative={row.cumulative}
-                recent14={row.recent14}
-                lastDate={row.lastDate}
-              />
-            ))}
-            {sparkRows.rows.length === 0 ? <Empty>{t('github.sparklines.empty')}</Empty> : null}
-          </div>
+          {(() => {
+            // Collapse-by-default. Show top 3 unless the user explicitly
+            // expands (then show up to 30). The cap of 30 stays in place to
+            // bound DOM size on accounts with hundreds of forks.
+            const COLLAPSED_COUNT = 3;
+            const EXPANDED_COUNT = 30;
+            const totalAvailable = Math.min(sparkRows.rows.length, EXPANDED_COUNT);
+            const visibleRows = sparkExpanded
+              ? sparkRows.rows.slice(0, EXPANDED_COUNT)
+              : sparkRows.rows.slice(0, COLLAPSED_COUNT);
+            const hiddenCount = totalAvailable - visibleRows.length;
+            return (
+              <>
+                <div className="mt-3 grid grid-cols-1 gap-1 md:grid-cols-2 xl:grid-cols-3">
+                  {visibleRows.map((row, index) => (
+                    <RepoSparklineCard
+                      key={row.repoName}
+                      rank={index + 1}
+                      repoName={row.repoName}
+                      repoUrl={row.repoUrl}
+                      values={row.values}
+                      metric={sparkMetric}
+                      sort={sparkSort}
+                      windowDays={sparkWindowDays}
+                      windowTotal={row.windowTotal}
+                      cumulative={row.cumulative}
+                      recent14={row.recent14}
+                      lastDate={row.lastDate}
+                    />
+                  ))}
+                  {sparkRows.rows.length === 0 ? (
+                    <Empty>{t('github.sparklines.empty')}</Empty>
+                  ) : null}
+                </div>
+                {/* Expand/collapse trigger. Hidden when there's nothing more
+                    to show (≤ COLLAPSED_COUNT rows) so the button never
+                    promises content that doesn't exist. */}
+                {totalAvailable > COLLAPSED_COUNT ? (
+                  <div className="mt-2 flex justify-center">
+                    <Button
+                      tone="ghost"
+                      onClick={() => setSparkExpanded((v) => !v)}
+                      className="!py-1 !text-[11px]"
+                    >
+                      {sparkExpanded
+                        ? t('github.sparklines.collapse')
+                        : t('github.sparklines.expand', { n: hiddenCount })}
+                    </Button>
+                  </div>
+                ) : null}
+              </>
+            );
+          })()}
         </Card>
       </Section>
 
@@ -1203,117 +1377,152 @@ export default function GithubRoute() {
             />
           </Toolbar>
 
-          <div className="mt-3 grid grid-cols-1 gap-2 lg:grid-cols-2">
-            {filteredRepos.slice(0, 50).map((repo) => {
-              const repoTraffic = trafficByRepo.get(repo.name);
-              const freshness = trafficFreshnessTone(repoTraffic?.lastDate);
-              const metrics = repoMetricsByName.get(repo.name);
-              const emptyVec: number[] = new Array(repoMetricsDaysNum).fill(0);
-              return (
-                <a
-                  key={repo.name}
-                  href={repo.url || '#'}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex flex-col gap-2 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2.5 hover:border-[var(--border-strong)] hover:bg-[var(--surface-2)]"
-                >
-                  {/* Header row : freshness dot + name + lang + fork chip +
-                      stars/forks + relative push date. Push date has full
-                      ISO in title attribute for exact-date hover. */}
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <Dot tone={freshness} />
-                      <span className="truncate text-[14px] font-medium text-[var(--text)]">
-                        {repo.name}
-                      </span>
-                      {repo.primary_lang ? <Chip>{repo.primary_lang}</Chip> : null}
-                      {repo.is_fork ? <Chip tone="warn">fork</Chip> : null}
-                    </div>
-                    <div className="flex flex-col items-end gap-0.5 text-[12px] text-[var(--text-mute)]">
-                      <div className="num whitespace-nowrap">
-                        ★ {numberLabel(repo.stars)} · ⑂ {numberLabel(repo.forks)}
-                      </div>
-                      <div
-                        className="whitespace-nowrap text-[11px] text-[var(--text-dim)]"
-                        title={formatPushed(repo.pushed_at)}
+          {(() => {
+            // Same collapse pattern as the sparklines module above: top 3 by
+            // default, expand to 30 max. The 30-cap mirrors the previous
+            // "slice(0, 50)" behaviour scaled down to keep parity with the
+            // sparklines section the user explicitly asked us to mirror.
+            const COLLAPSED_COUNT = 3;
+            const EXPANDED_COUNT = 30;
+            const totalAvailable = Math.min(filteredRepos.length, EXPANDED_COUNT);
+            const visibleRepos = reposExpanded
+              ? filteredRepos.slice(0, EXPANDED_COUNT)
+              : filteredRepos.slice(0, COLLAPSED_COUNT);
+            const hiddenCount = totalAvailable - visibleRepos.length;
+            return (
+              <>
+                <div className="mt-3 grid grid-cols-1 gap-2 lg:grid-cols-2">
+                  {visibleRepos.map((repo) => {
+                    const repoTraffic = trafficByRepo.get(repo.name);
+                    const freshness = trafficFreshnessTone(repoTraffic?.lastDate);
+                    const metrics = repoMetricsByName.get(repo.name);
+                    const emptyVec: number[] = new Array(repoMetricsDaysNum).fill(0);
+                    return (
+                      <a
+                        key={repo.name}
+                        href={repo.url || '#'}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex flex-col gap-2 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2.5 hover:border-[var(--border-strong)] hover:bg-[var(--surface-2)]"
                       >
-                        {t('github.repos.pushedRelative', {
-                          rel: relativeTime(repo.pushed_at, t),
-                        })}
-                      </div>
-                    </div>
-                  </div>
+                        {/* Header row : freshness dot + name + lang + fork chip +
+                            stars/forks + relative push date. Push date has full
+                            ISO in title attribute for exact-date hover. */}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <Dot tone={freshness} />
+                            <span className="truncate text-[14px] font-medium text-[var(--text)]">
+                              {repo.name}
+                            </span>
+                            {repo.primary_lang ? <Chip>{repo.primary_lang}</Chip> : null}
+                            {repo.is_fork ? <Chip tone="warn">fork</Chip> : null}
+                          </div>
+                          <div className="flex flex-col items-end gap-0.5 text-[12px] text-[var(--text-mute)]">
+                            <div className="num whitespace-nowrap">
+                              ★ {numberLabel(repo.stars)} · ⑂ {numberLabel(repo.forks)}
+                            </div>
+                            <div
+                              className="whitespace-nowrap text-[11px] text-[var(--text-dim)]"
+                              title={formatPushed(repo.pushed_at)}
+                            >
+                              {t('github.repos.pushedRelative', {
+                                rel: relativeTime(repo.pushed_at, t),
+                              })}
+                            </div>
+                          </div>
+                        </div>
 
-                  {/* Description + topics */}
-                  <div>
-                    <div className="line-clamp-2 text-[12px] text-[var(--text-dim)]">
-                      {repo.description || '—'}
-                    </div>
-                    {repo.topics && repo.topics.length > 0 ? (
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {repo.topics.slice(0, 5).map((topic) => (
-                          <span
-                            key={topic}
-                            className="inline-block rounded-full bg-[var(--surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--text-faint)]"
-                          >
-                            #{topic}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
+                        {/* Description + topics */}
+                        <div>
+                          <div className="line-clamp-2 text-[12px] text-[var(--text-dim)]">
+                            {repo.description || '—'}
+                          </div>
+                          {repo.topics && repo.topics.length > 0 ? (
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {repo.topics.slice(0, 5).map((topic) => (
+                                <span
+                                  key={topic}
+                                  className="inline-block rounded-full bg-[var(--surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--text-faint)]"
+                                >
+                                  #{topic}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
 
-                  {/* 4 mini bar-charts on the same window: NPM / views /
-                      clones / commits. Each normalised on its own max so
-                      shapes are readable even on low-volume repos. */}
-                  <div className="grid grid-cols-4 gap-2 border-t border-[var(--border)] pt-2">
-                    <RepoMiniBarChart
-                      label={t('github.repos.npmCell')}
-                      values={metrics?.npm || emptyVec}
-                      color="#ff2d95"
-                    />
-                    <RepoMiniBarChart
-                      label={t('github.repos.viewsCell')}
-                      values={metrics?.views || emptyVec}
-                      color="#64d2ff"
-                    />
-                    <RepoMiniBarChart
-                      label={t('github.repos.clonesCell')}
-                      values={metrics?.clones || emptyVec}
-                      color="#30d158"
-                    />
-                    <RepoMiniBarChart
-                      label={t('github.repos.commitsCell')}
-                      values={metrics?.commits || emptyVec}
-                      color="#ffd60a"
-                    />
-                  </div>
+                        {/* 4 mini bar-charts on the same window: NPM / views /
+                            clones / commits. Each normalised on its own max so
+                            shapes are readable even on low-volume repos. */}
+                        <div className="grid grid-cols-4 gap-2 border-t border-[var(--border)] pt-2">
+                          <RepoMiniBarChart
+                            label={t('github.repos.npmCell')}
+                            values={metrics?.npm || emptyVec}
+                            color="#ff2d95"
+                          />
+                          <RepoMiniBarChart
+                            label={t('github.repos.viewsCell')}
+                            values={metrics?.views || emptyVec}
+                            color="#64d2ff"
+                          />
+                          <RepoMiniBarChart
+                            label={t('github.repos.clonesCell')}
+                            values={metrics?.clones || emptyVec}
+                            color="#30d158"
+                          />
+                          <RepoMiniBarChart
+                            label={t('github.repos.commitsCell')}
+                            values={metrics?.commits || emptyVec}
+                            color="#ffd60a"
+                          />
+                        </div>
 
-                  {/* Footer : last traffic snapshot date + viewsUniques for
-                      audience quality signal. Kept subtle. */}
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0 text-[10.5px] text-[var(--text-faint)]">
-                    {repoTraffic?.lastDate ? (
-                      <span className="num">
-                        {t('github.repos.lastSnapshot', { date: repoTraffic.lastDate })}
-                      </span>
-                    ) : null}
-                    {repoTraffic && repoTraffic.viewsUniquesRecent > 0 ? (
-                      <>
-                        <span>·</span>
-                        <span className="num">
-                          {t('github.repos.uniques', {
-                            n: numberLabel(repoTraffic.viewsUniquesRecent),
-                          })}
-                        </span>
-                      </>
-                    ) : null}
-                  </div>
-                </a>
-              );
-            })}
+                        {/* Footer : last traffic snapshot date + viewsUniques for
+                            audience quality signal. Kept subtle. */}
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0 text-[10.5px] text-[var(--text-faint)]">
+                          {repoTraffic?.lastDate ? (
+                            <span className="num">
+                              {t('github.repos.lastSnapshot', { date: repoTraffic.lastDate })}
+                            </span>
+                          ) : null}
+                          {repoTraffic && repoTraffic.viewsUniquesRecent > 0 ? (
+                            <>
+                              <span>·</span>
+                              <span className="num">
+                                {t('github.repos.uniques', {
+                                  n: numberLabel(repoTraffic.viewsUniquesRecent),
+                                })}
+                              </span>
+                            </>
+                          ) : null}
+                        </div>
+                      </a>
+                    );
+                  })}
 
-            {filteredRepos.length === 0 ? <Empty>{t('github.repos.emptyFilter')}</Empty> : null}
-          </div>
+                  {filteredRepos.length === 0 ? (
+                    <Empty>{t('github.repos.emptyFilter')}</Empty>
+                  ) : null}
+                </div>
+                {/* Expand/collapse trigger. Hidden when ≤ COLLAPSED_COUNT
+                    rows are available so the button never promises content
+                    that doesn't exist. */}
+                {totalAvailable > COLLAPSED_COUNT ? (
+                  <div className="mt-2 flex justify-center">
+                    <Button
+                      tone="ghost"
+                      onClick={() => setReposExpanded((v) => !v)}
+                      className="!py-1 !text-[11px]"
+                    >
+                      {reposExpanded
+                        ? t('github.repos.collapse')
+                        : t('github.repos.expand', { n: hiddenCount })}
+                    </Button>
+                  </div>
+                ) : null}
+              </>
+            );
+          })()}
         </Card>
       </Section>
     </div>

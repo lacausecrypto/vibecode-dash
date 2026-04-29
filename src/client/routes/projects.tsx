@@ -1056,28 +1056,35 @@ const ProjectRow = memo(function ProjectRow({ project }: { project: ProjectSumma
       to={`/projects/${project.id}`}
       className="group block rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2 transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-2)]"
     >
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span
-          aria-hidden="true"
-          className="h-1.5 w-1.5 shrink-0 rounded-full"
-          style={{ backgroundColor: healthColor(project.health_score) }}
-        />
-        <span className="truncate text-[13.5px] font-medium text-[var(--text)] group-hover:text-white">
-          {project.name}
-        </span>
-        <span className="shrink-0 rounded-full border border-[var(--border)] px-1.5 py-0 text-[9.5px] uppercase tracking-wider text-[var(--text-faint)]">
-          {project.type}
-        </span>
-        {project.git_branch ? (
-          <span className="shrink-0 text-[10.5px] text-[var(--text-faint)]">
-            <span aria-hidden="true">⎇</span> {project.git_branch}
+      {/* Two-zone layout: identity (left) + metrics (right). On mobile
+          we force a column stack — every row gets exactly 2 visual lines
+          regardless of whether git_branch is set, so card heights are
+          uniform across the list. From sm+ we revert to a single-row
+          flex with wrap for the original dense desktop look. */}
+      <div className="flex flex-col gap-1.5 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3 sm:gap-y-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 sm:flex-1">
+          <span
+            aria-hidden="true"
+            className="h-1.5 w-1.5 shrink-0 rounded-full"
+            style={{ backgroundColor: healthColor(project.health_score) }}
+          />
+          <span className="truncate text-[13.5px] font-medium text-[var(--text)] group-hover:text-white">
+            {project.name}
           </span>
-        ) : null}
-        <span className="hidden min-w-0 flex-1 truncate text-[11px] text-[var(--text-dim)] md:inline">
-          {project.path}
-        </span>
+          <span className="shrink-0 rounded-full border border-[var(--border)] px-1.5 py-0 text-[9.5px] uppercase tracking-wider text-[var(--text-faint)]">
+            {project.type}
+          </span>
+          {project.git_branch ? (
+            <span className="shrink-0 text-[10.5px] text-[var(--text-faint)]">
+              <span aria-hidden="true">⎇</span> {project.git_branch}
+            </span>
+          ) : null}
+          <span className="hidden min-w-0 flex-1 truncate text-[11px] text-[var(--text-dim)] md:inline">
+            {project.path}
+          </span>
+        </div>
 
-        <div className="ml-auto flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2 sm:ml-auto">
           <LangBar languages={languages} width={96} />
           {topLangs.length > 0 ? (
             <span className="hidden text-[10px] uppercase tracking-wider text-[var(--text-faint)] sm:inline">
@@ -1095,7 +1102,7 @@ const ProjectRow = memo(function ProjectRow({ project }: { project: ProjectSumma
               {project.uncommitted} {t('common.dirty')}
             </Chip>
           ) : null}
-          <span className="num w-20 shrink-0 text-right text-[11px] text-[var(--text-dim)] tabular-nums">
+          <span className="num ml-auto w-20 shrink-0 text-right text-[11px] text-[var(--text-dim)] tabular-nums sm:ml-0">
             {fmtDays(days, t)}
           </span>
         </div>

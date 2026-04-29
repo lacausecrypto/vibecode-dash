@@ -537,7 +537,12 @@ export const DICT_EN = {
       totalViews: 'views',
       totalClones: 'clones',
       viewGrid: 'Grid',
-      viewLine: 'Line',
+      viewLine: 'Cumul',
+      bucketDay: 'Day',
+      bucketWeek: 'Week',
+      bucketBiweekly: '14 d',
+      bucketMonth: 'Month',
+      bucketQuarter: 'Qtr',
     },
     syncLog: {
       title: 'Refresh log',
@@ -556,6 +561,8 @@ export const DICT_EN = {
       onlyTraffic: 'traffic only',
       empty: 'No repo matches filters.',
       daysWindow: '{n}d',
+      expand: 'Show {n} more',
+      collapse: 'Collapse',
     },
     repos: {
       title: 'Repos',
@@ -576,6 +583,8 @@ export const DICT_EN = {
       commitsCell: 'Commits',
       uniques: '{n} uniques',
       pushedRelative: 'push {rel}',
+      expand: 'Show {n} more',
+      collapse: 'Collapse',
     },
     syncBanner: {
       pending: 'Sync in progress — heatmap · repos · traffic',
@@ -1286,6 +1295,7 @@ export const DICT_EN = {
       data: 'Data',
       costs: 'Costs',
       display: 'Display',
+      presence: 'Presence',
       logs: 'Logs',
       shortcuts: 'Shortcuts',
       about: 'About',
@@ -1422,6 +1432,9 @@ export const DICT_EN = {
     },
 
     actions: {
+      title: 'Radar actions',
+      meta: 'Auto-scan via Claude CLI · insight generation · manual entry',
+      manualHint: 'Already know a competitor? Add it without re-running a full scan.',
       scanTitle: 'Scan competitors via Claude CLI (⌨ S)',
       scanning: 'Scanning…',
       scan: 'Scan competitors',
@@ -1432,6 +1445,11 @@ export const DICT_EN = {
       cancelAdd: '× Cancel',
       addManual: '+ Add manual',
       add: 'Add',
+    },
+
+    kpi: {
+      title: 'Radar status',
+      meta: 'Competitors and insight breakdown for this project',
     },
 
     lastRun: {
@@ -1459,6 +1477,7 @@ export const DICT_EN = {
       sectionTitle: 'Competitors · {n}',
       viewCards: 'Cards',
       viewMatrix: 'Matrix',
+      emptyHint: 'No competitors recorded for this project yet.',
       emptyPrefix: 'No competitors. Press ',
       emptyMiddle: ' (Scan) or ',
       emptySuffix: '.',
@@ -1488,6 +1507,8 @@ export const DICT_EN = {
     },
 
     global: {
+      statsTitle: 'Overview',
+      statsMeta: 'cross-project aggregates',
       emptyTitle: 'No project has a radar yet',
       emptyMeta: 'zero competitors · zero insights',
       emptyBody:
@@ -1533,7 +1554,6 @@ export const DICT_EN = {
       feed: 'Feed',
       sources: 'Sources',
       stats: 'Stats',
-      settings: 'Settings',
     },
 
     feed: {
@@ -1935,6 +1955,17 @@ export const DICT_EN = {
       disconnect: 'Disconnect',
       disconnected: 'Disconnected',
       disconnectConfirm: 'Disconnect? The secret will be wiped from Keychain.',
+      groups: {
+        automation: 'Automation',
+        learning: 'Learning & persona',
+        connections: 'External connections',
+      },
+      hero: {
+        title: 'Connection status',
+        summary: '{connected}/{total} services connected',
+        xRead: 'X read',
+        xWrite: 'X write',
+      },
       connections: {
         title: 'Platform connections',
         meta: 'Secrets live in macOS Keychain — dashboard only holds the reference.',
