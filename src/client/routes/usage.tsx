@@ -1,19 +1,10 @@
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
-import {
-  Bar,
-  CartesianGrid,
-  ComposedChart,
-  Legend,
-  Line,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
 import { Heatmap } from '../components/Heatmap';
+import { HeatmapStackedBars } from '../components/HeatmapStackedBars';
 import { ProjectsUsageLLM } from '../components/ProjectsUsageLLM';
 import { Segmented } from '../components/ui';
 import { apiGet } from '../lib/api';
+import { type GroupBy, type StackedDailyRow, repoColor } from '../lib/cumulStacks';
 import { type Locale, dateLocale, numberLocale, useTranslation } from '../lib/i18n';
 import { type BillingHistory, computeBillingCost } from '../lib/pricing';
 
@@ -103,6 +94,19 @@ type UsageMeta = {
 type UsageResponse<T> = {
   rows: T[];
   meta: UsageMeta;
+};
+
+// Shape returned by /api/usage/by-project/stacked-daily — one row per
+// (date, project, source). `source` is null for synthetic idle rows
+// (subscription paid, no project active that day — folded across
+// sources). `realEur` is the time-weighted SUBSCRIPTION accrual (€).
+type ProjectStackedDailyRow = {
+  date: string;
+  project: string;
+  source: 'claude' | 'codex' | null;
+  tokensActive: number;
+  tokensAll: number;
+  realEur: number;
 };
 
 type ToolUsageResponse = {
@@ -391,6 +395,10 @@ export default function UsageRoute() {
     codex?: string | null;
   }>({});
   const [byProject, setByProject] = useState<ProjectUsageRow[]>([]);
+  // Daily per-project rows feeding the cumul stacked-bars view (one segment
+  // per project). Both providers folded together server-side so the chart
+  // shows project shares without mixing in the claude-vs-codex axis.
+  const [projectStackedDaily, setProjectStackedDaily] = useState<ProjectStackedDailyRow[]>([]);
   const [byModel, setByModel] = useState<ModelUsageRow[]>([]);
   const [hourly, setHourly] = useState<HourDistributionRow[]>([]);
   const [toolUsage, setToolUsage] = useState<ToolUsageRow[]>([]);
@@ -414,11 +422,22 @@ export default function UsageRoute() {
   const [isCodexToolLoading, setIsCodexToolLoading] = useState(false);
   const [range, setRange] = useState<TimeRange>('90d');
   const [tokenLens, setTokenLens] = useState<TokenLens>('active');
-  const [chartBucket, setChartBucket] = useState<'day' | 'week' | 'month' | 'year'>('day');
   const [heatmapSource, setHeatmapSource] = useState<HeatmapSource>('total');
   const [heatmapDayFilter, setHeatmapDayFilter] = useState<HeatmapDayFilter>('all');
   const [heatmapIntensity, setHeatmapIntensity] = useState<HeatmapIntensityFilter>('all');
   const [heatmapScale, setHeatmapScale] = useState<HeatmapScale>('linear');
+  // View toggle for the merged heatmap module: calendar grid (existing) vs
+  // cumulative stacked bars per provider (new — mirrors the github heatmap
+  // cumul view). Defaults to grid so the page reads the same on first paint;
+  // the cumul view is opt-in via the toolbar segmented control.
+  const [heatmapView, setHeatmapView] = useState<'grid' | 'cumul'>('grid');
+  // Granularity for the cumul stacked-bars view. 'month' = 12 columns over
+  // the active range, reads cleanly. Other modes mirror the github heatmap.
+  const [heatmapBucket, setHeatmapBucket] = useState<GroupBy>('month');
+  // Metric driving the cumul view's Y values: tokens (volumes) or cost (€).
+  // Replaces the old "Volume tokens + coût" panel — both signals live here
+  // now, swapped via this control. Provider stacking is automatic.
+  const [heatmapMetric, setHeatmapMetric] = useState<'tokens' | 'cost'>('tokens');
   const [analyticsProvider, setAnalyticsProvider] = useState<AnalyticsProvider>('claude');
   const [selectedProjectRef, setSelectedProjectRef] = useState<string>('');
   const [selectedCodexProjectRef, setSelectedCodexProjectRef] = useState<string>('');
@@ -500,8 +519,11 @@ export default function UsageRoute() {
       apiGet<UsageResponse<ProjectUsageRow>>(`/api/usage/by-project?from=${fromIso}&limit=80`),
       apiGet<UsageResponse<ModelUsageRow>>(`/api/usage/by-model?from=${fromIso}`),
       apiGet<UsageResponse<HourDistributionRow>>(`/api/usage/hour-distribution?from=${fromIso}`),
+      apiGet<{ rows: ProjectStackedDailyRow[] }>(
+        `/api/usage/by-project/stacked-daily?from=${fromIso}`,
+      ),
     ])
-      .then(([combinedData, projectData, modelData, hourData]) => {
+      .then(([combinedData, projectData, modelData, hourData, stackedDailyData]) => {
         if (cancelled) {
           return;
         }
@@ -511,6 +533,7 @@ export default function UsageRoute() {
         setByProject(projectData.rows || []);
         setByModel(modelData.rows || []);
         setHourly(hourData.rows || []);
+        setProjectStackedDaily(stackedDailyData.rows || []);
         setJsonlMeta(projectData.meta || modelData.meta || hourData.meta || null);
 
         setSelectedProjectRef((current) => {
@@ -538,7 +561,7 @@ export default function UsageRoute() {
   }, [range]);
 
   // Claude rate-limits: derived from ccusage blocks (5h billing window). Not in
-  // the main Promise.all above because the endpoint shells out to `npx ccusage`
+  // the main Promise.all above because the endpoint shells out to `ccusage`
   // which is much slower than the JSONL-backed routes, and we don't want it
   // blocking the initial render.
   useEffect(() => {
@@ -756,6 +779,99 @@ export default function UsageRoute() {
     return rows;
   }, [dailyCombined, range, tokenLens]);
 
+  // Per-project daily series feeding the cumul stacked-bars view. One
+  // segment per project (not per provider) so the chart shows the user's
+  // project mix over time. Both providers are folded together at the
+  // server level (see /api/usage/by-project/stacked-daily) so a project's
+  // segment is its TOTAL across claude+codex.
+  //
+  // We collapse multiple same-day rows of the same project (same project
+  // contributing under both providers on the same day) into a single
+  // {project: total} entry per date. Tokens follow the active/all lens;
+  // cost is provider-agnostic (sum of cost_usd, both sources).
+  //
+  // RECONCILIATION: the project scanner only sees Claude sessions whose
+  // `cwd` matches a configured project root, while ccusage (driving the
+  // TOTAL TOKENS card via `usage_daily`) scans every JSONL on disk. The
+  // resulting per-day gap is emitted as an "__untracked__" segment so the
+  // header total reconciles with the top card and the user can SEE the
+  // unattributed mass. Cost reconciles by construction (subscription
+  // rate split among active projects, sums to the daily rate).
+  const heatmapStackedDaily = useMemo<{
+    tokens: StackedDailyRow[];
+    cost: StackedDailyRow[];
+    untrackedLabel: string;
+    idleLabel: string;
+    // Per composite key ("project · claude" / "project · codex"), maps
+    // back to the underlying project name. Used by the colour map to
+    // pick the right hue, and by the chart sort to group siblings.
+    tokenKeyToProject: Map<string, string>;
+  }>(() => {
+    const tokenField: keyof ProjectStackedDailyRow =
+      tokenLens === 'all' ? 'tokensAll' : 'tokensActive';
+    const untrackedLabel = t('usage.heatmap.untracked');
+    const idleLabel = t('usage.heatmap.idle');
+
+    const fromIso = chartData[0]?.date;
+    const toIso = chartData[chartData.length - 1]?.date;
+    const inRange = (d: string): boolean => (!fromIso || d >= fromIso) && (!toIso || d <= toIso);
+
+    const tokenMap = new Map<string, Record<string, number>>();
+    const costMap = new Map<string, Record<string, number>>();
+    // Tokens view: split each project into "{project} · claude" and
+    // "{project} · codex" so the user reads the per-provider mix INSIDE
+    // each project segment. Cost view stays folded — no source split, the
+    // EUR accrual is provider-agnostic from the user's perspective.
+    const tokenKeyToProject = new Map<string, string>();
+    for (const row of projectStackedDaily) {
+      if (!inRange(row.date)) continue;
+      const isIdle = row.project === '__idle__';
+      const projectLabel = isIdle ? idleLabel : row.project;
+
+      if (!isIdle) {
+        // source can only be null on idle rows; this branch always has it.
+        const sourceLabel = row.source === 'codex' ? 'codex' : 'claude';
+        const tokenKey = `${projectLabel} · ${sourceLabel}`;
+        tokenKeyToProject.set(tokenKey, projectLabel);
+        const tBucket = tokenMap.get(row.date) ?? {};
+        tBucket[tokenKey] = (tBucket[tokenKey] ?? 0) + Number(row[tokenField] ?? 0);
+        tokenMap.set(row.date, tBucket);
+      }
+
+      const cBucket = costMap.get(row.date) ?? {};
+      cBucket[projectLabel] = (cBucket[projectLabel] ?? 0) + Number(row.realEur ?? 0);
+      costMap.set(row.date, cBucket);
+    }
+
+    // Top-up the tokens series with the untracked diff per day. We only
+    // do this for tokens — cost reconciles automatically (daily rate is
+    // distributed among active projects, no unattributed mass possible).
+    for (const row of chartData) {
+      if (!inRange(row.date)) continue;
+      const tBucket = tokenMap.get(row.date) ?? {};
+      const summed = Object.values(tBucket).reduce((a, b) => a + b, 0);
+      const expected = row.totalSelectedTokens;
+      const diff = expected - summed;
+      if (diff > 0) {
+        tBucket[untrackedLabel] = (tBucket[untrackedLabel] ?? 0) + diff;
+        tokenMap.set(row.date, tBucket);
+      }
+    }
+
+    const toRows = (m: Map<string, Record<string, number>>): StackedDailyRow[] =>
+      [...m.entries()]
+        .map(([date, values]) => ({ date, values }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+
+    return {
+      tokens: toRows(tokenMap),
+      cost: toRows(costMap),
+      untrackedLabel,
+      idleLabel,
+      tokenKeyToProject,
+    };
+  }, [projectStackedDaily, chartData, tokenLens, t]);
+
   const totals = useMemo(() => {
     return chartData.reduce(
       (acc, row) => {
@@ -827,95 +943,6 @@ export default function UsageRoute() {
 
     return [...map.values()].sort((a, b) => a.month.localeCompare(b.month));
   }, [chartData]);
-
-  // Chart fusionné : agrégation par bucket (jour/semaine/mois/année) avec cumul
-  // des tokens (actif + cache séparés) et des coûts par provider. Même forme de row
-  // que chartData journalier → compatible avec ComposedChart (bars + lines).
-  const bucketedChart = useMemo(() => {
-    if (chartBucket === 'day') {
-      return chartData.map((row) => ({ ...row, bucketKey: row.date, label: row.date }));
-    }
-    const keyOf = (dateIso: string): { key: string; label: string } => {
-      const d = new Date(`${dateIso}T00:00:00Z`);
-      if (chartBucket === 'month') {
-        const key = dateIso.slice(0, 7);
-        return { key, label: key };
-      }
-      if (chartBucket === 'year') {
-        const key = dateIso.slice(0, 4);
-        return { key, label: key };
-      }
-      // week : ISO week (Mon-first). key = YYYY-Www
-      const tmp = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-      const dayNum = (tmp.getUTCDay() + 6) % 7;
-      tmp.setUTCDate(tmp.getUTCDate() - dayNum + 3);
-      const firstThursday = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 4));
-      const week = 1 + Math.round(((tmp.getTime() - firstThursday.getTime()) / 86_400_000 - 3) / 7);
-      const key = `${tmp.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
-      return { key, label: key };
-    };
-
-    const map = new Map<
-      string,
-      {
-        bucketKey: string;
-        label: string;
-        claudeActiveTokens: number;
-        claudeCacheTokens: number;
-        claudeAllTokens: number;
-        codexActiveTokens: number;
-        codexCacheTokens: number;
-        codexAllTokens: number;
-        totalActiveTokens: number;
-        totalAllTokens: number;
-        totalSelectedTokens: number;
-        claudeSelectedTokens: number;
-        codexSelectedTokens: number;
-        claudeCost: number;
-        codexCost: number;
-        totalCost: number;
-      }
-    >();
-
-    for (const row of chartData) {
-      const { key, label } = keyOf(row.date);
-      const bucket = map.get(key) || {
-        bucketKey: key,
-        label,
-        claudeActiveTokens: 0,
-        claudeCacheTokens: 0,
-        claudeAllTokens: 0,
-        codexActiveTokens: 0,
-        codexCacheTokens: 0,
-        codexAllTokens: 0,
-        totalActiveTokens: 0,
-        totalAllTokens: 0,
-        totalSelectedTokens: 0,
-        claudeSelectedTokens: 0,
-        codexSelectedTokens: 0,
-        claudeCost: 0,
-        codexCost: 0,
-        totalCost: 0,
-      };
-      bucket.claudeActiveTokens += row.claudeActiveTokens;
-      bucket.claudeCacheTokens += row.claudeCacheTokens;
-      bucket.claudeAllTokens += row.claudeAllTokens;
-      bucket.codexActiveTokens += row.codexActiveTokens;
-      bucket.codexCacheTokens += row.codexCacheTokens;
-      bucket.codexAllTokens += row.codexAllTokens;
-      bucket.totalActiveTokens += row.totalActiveTokens;
-      bucket.totalAllTokens += row.totalAllTokens;
-      bucket.totalSelectedTokens += row.totalSelectedTokens;
-      bucket.claudeSelectedTokens += row.claudeSelectedTokens;
-      bucket.codexSelectedTokens += row.codexSelectedTokens;
-      bucket.claudeCost += row.claudeCost;
-      bucket.codexCost += row.codexCost;
-      bucket.totalCost += row.totalCost;
-      map.set(key, bucket);
-    }
-
-    return [...map.values()].sort((a, b) => a.bucketKey.localeCompare(b.bucketKey));
-  }, [chartData, chartBucket]);
 
   const baseHeatmapDays = useMemo(() => {
     const key =
@@ -1057,6 +1084,36 @@ export default function UsageRoute() {
 
   const topToolMax = toolUsage[0]?.count || 1;
 
+  // Composite colour map for the cumul views.
+  //   - Untracked (tokens-only sentinel): mid grey
+  //   - Idle      (cost-only sentinel)  : darker grey
+  //   - Tokens view, per composite key "{project} · claude" / "… · codex":
+  //       base hue from project hash inside the cyan family;
+  //       claude = base lightness, codex = base + 15 (lighter) so the user
+  //       reads "same project, two providers" inside one stack block.
+  // Cost view keys are project-only and fall through to the scheme hash
+  // colour (no override needed).
+  const cumulColorMap = useMemo<Record<string, string>>(() => {
+    const map: Record<string, string> = {
+      [heatmapStackedDaily.untrackedLabel]: 'hsl(0, 0%, 38%)',
+      [heatmapStackedDaily.idleLabel]: 'hsl(0, 0%, 28%)',
+    };
+    if (heatmapMetric !== 'tokens') return map;
+    const lighten = (hsl: string, deltaL: number): string => {
+      const m = hsl.match(/hsl\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)/);
+      if (!m) return hsl;
+      const h = m[1];
+      const s = m[2];
+      const l = Math.max(20, Math.min(78, Number(m[3]) + deltaL));
+      return `hsl(${h}, ${s}%, ${l}%)`;
+    };
+    for (const [tokenKey, project] of heatmapStackedDaily.tokenKeyToProject.entries()) {
+      const base = repoColor(project, 'cyan');
+      map[tokenKey] = tokenKey.endsWith('· codex') ? lighten(base, 15) : base;
+    }
+    return map;
+  }, [heatmapStackedDaily, heatmapMetric]);
+
   return (
     <div className="flex flex-col gap-6">
       <div className="section-head">
@@ -1165,201 +1222,176 @@ export default function UsageRoute() {
         </MetricCard>
       </div>
 
+      {/* Merged module: calendar heatmap (Grille) + cumulative stacked bars
+          per provider (Cumul). The cumul view absorbs the former "Volume
+          tokens + coût" panel — same daily series, displayed cumulatively
+          per provider with a metric switch (tokens / coût). Mirrors the
+          github heatmap module's grid/cumul UX. */}
       <Panel
         title={t('usage.metrics.heatmapUsage')}
-        subtitle={`${t('usage.filters.source')}: ${heatmapSourceLabel(heatmapSource)} · ${providerTokenTitle(tokenLens)}`}
-      >
-        <div className="mb-3 flex flex-wrap items-end gap-3">
-          <LabeledSelect
-            label={t('usage.filters.source')}
-            value={heatmapSource}
-            options={HEATMAP_KEYS.map((k) => ({ value: k, label: t(`usage.heatmapSource.${k}`) }))}
-            onChange={(value) => setHeatmapSource(value as HeatmapSource)}
-          />
-          <LabeledSelect
-            label={t('usage.filters.dayFilter')}
-            value={heatmapDayFilter}
-            options={HEATMAP_DAY_KEYS.map((k) => ({
-              value: k,
-              label: t(`usage.heatmapDayFilter.${k}`),
-            }))}
-            onChange={(value) => setHeatmapDayFilter(value as HeatmapDayFilter)}
-          />
-          <LabeledSelect
-            label={t('usage.filters.intensity')}
-            value={heatmapIntensity}
-            options={HEATMAP_INTENSITY_KEYS.map((k) => ({
-              value: k,
-              label: t(`usage.heatmapIntensity.${k}`),
-            }))}
-            onChange={(value) => setHeatmapIntensity(value as HeatmapIntensityFilter)}
-          />
-          <LabeledSelect
-            label={t('usage.filters.scale')}
-            value={heatmapScale}
-            options={HEATMAP_SCALE_KEYS.map((k) => ({
-              value: k,
-              label: t(`usage.heatmapScale.${k}`),
-            }))}
-            onChange={(value) => setHeatmapScale(value as HeatmapScale)}
-          />
-        </div>
-
-        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-          <span className="ui-chip">
-            {t('usage.filters.visibleDays', {
-              visible: heatmapModel.visibleDays,
-              total: heatmapModel.scopedDays,
-            })}
-          </span>
-          <span className="ui-chip">
-            {t('usage.filters.threshold', {
-              value:
-                heatmapIntensity === 'all'
-                  ? t('usage.filters.thresholdNone')
-                  : numberLabel(heatmapModel.threshold),
-            })}
-          </span>
-          <span className="ui-chip">
-            {t('usage.filters.scaleLabel', {
-              value:
-                heatmapScale === 'log'
-                  ? t('usage.filters.scaleLog')
-                  : t('usage.filters.scaleLinear'),
-            })}
-          </span>
-        </div>
-
-        {heatmapModel.days.length === 0 ? (
-          <EmptyBlock message={t('usage.filters.emptyHeatmap')} />
-        ) : (
-          <Heatmap
-            days={heatmapModel.days}
-            palette={heatmapPalette}
-            totalLabel={providerTokenTitle(tokenLens).toLowerCase()}
-            totalValue={heatmapModel.rawTotalInScope}
-            cellSize={14}
-            cellGap={4}
-            minWidth={1040}
-          />
-        )}
-      </Panel>
-
-      <Panel
-        title={t('usage.tokensPanelTitle')}
         subtitle={
-          tokenLens === 'all'
-            ? t('usage.tokensPanelSubtitleAll')
-            : t('usage.tokensPanelSubtitleActive')
-        }
-        action={
-          <div className="flex items-center gap-1">
-            {(
-              [
-                { value: 'day', label: t('usage.bucket.day') },
-                { value: 'week', label: t('usage.bucket.week') },
-                { value: 'month', label: t('usage.bucket.month') },
-                { value: 'year', label: t('usage.bucket.year') },
-              ] as const
-            ).map((opt) => {
-              const active = chartBucket === opt.value;
-              return (
-                <button
-                  key={opt.value}
-                  type="button"
-                  onClick={() => setChartBucket(opt.value)}
-                  className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${active ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]' : 'border-[var(--border)] text-[var(--text-dim)] hover:border-[var(--border-strong)] hover:text-[var(--text)]'}`}
-                  aria-pressed={active}
-                >
-                  {opt.label}
-                </button>
-              );
-            })}
-          </div>
+          heatmapView === 'grid'
+            ? `${t('usage.filters.source')}: ${heatmapSourceLabel(heatmapSource)} · ${providerTokenTitle(tokenLens)}`
+            : heatmapMetric === 'tokens'
+              ? providerTokenTitle(tokenLens)
+              : t('usage.heatmap.metricCostSubtitle')
         }
       >
-        {bucketedChart.length === 0 ? (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <Segmented
+            value={heatmapView}
+            options={[
+              { value: 'grid', label: t('usage.heatmap.viewGrid') },
+              { value: 'cumul', label: t('usage.heatmap.viewCumul') },
+            ]}
+            onChange={(value) => setHeatmapView(value as 'grid' | 'cumul')}
+          />
+          {heatmapView === 'cumul' ? (
+            <>
+              <Segmented
+                value={heatmapMetric}
+                options={[
+                  { value: 'tokens', label: t('usage.heatmap.metricTokens') },
+                  { value: 'cost', label: t('usage.heatmap.metricCost') },
+                ]}
+                onChange={(value) => setHeatmapMetric(value as 'tokens' | 'cost')}
+              />
+              <Segmented
+                value={heatmapBucket}
+                options={[
+                  { value: 'day', label: t('usage.heatmap.bucketDay') },
+                  { value: 'week', label: t('usage.heatmap.bucketWeek') },
+                  { value: 'biweekly', label: t('usage.heatmap.bucketBiweekly') },
+                  { value: 'month', label: t('usage.heatmap.bucketMonth') },
+                  { value: 'quarter', label: t('usage.heatmap.bucketQuarter') },
+                ]}
+                onChange={(value) => setHeatmapBucket(value as GroupBy)}
+              />
+            </>
+          ) : null}
+        </div>
+
+        {heatmapView === 'grid' ? (
+          <>
+            <div className="mb-3 flex flex-wrap items-end gap-3">
+              <LabeledSelect
+                label={t('usage.filters.source')}
+                value={heatmapSource}
+                options={HEATMAP_KEYS.map((k) => ({
+                  value: k,
+                  label: t(`usage.heatmapSource.${k}`),
+                }))}
+                onChange={(value) => setHeatmapSource(value as HeatmapSource)}
+              />
+              <LabeledSelect
+                label={t('usage.filters.dayFilter')}
+                value={heatmapDayFilter}
+                options={HEATMAP_DAY_KEYS.map((k) => ({
+                  value: k,
+                  label: t(`usage.heatmapDayFilter.${k}`),
+                }))}
+                onChange={(value) => setHeatmapDayFilter(value as HeatmapDayFilter)}
+              />
+              <LabeledSelect
+                label={t('usage.filters.intensity')}
+                value={heatmapIntensity}
+                options={HEATMAP_INTENSITY_KEYS.map((k) => ({
+                  value: k,
+                  label: t(`usage.heatmapIntensity.${k}`),
+                }))}
+                onChange={(value) => setHeatmapIntensity(value as HeatmapIntensityFilter)}
+              />
+              <LabeledSelect
+                label={t('usage.filters.scale')}
+                value={heatmapScale}
+                options={HEATMAP_SCALE_KEYS.map((k) => ({
+                  value: k,
+                  label: t(`usage.heatmapScale.${k}`),
+                }))}
+                onChange={(value) => setHeatmapScale(value as HeatmapScale)}
+              />
+            </div>
+
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+              <span className="ui-chip">
+                {t('usage.filters.visibleDays', {
+                  visible: heatmapModel.visibleDays,
+                  total: heatmapModel.scopedDays,
+                })}
+              </span>
+              <span className="ui-chip">
+                {t('usage.filters.threshold', {
+                  value:
+                    heatmapIntensity === 'all'
+                      ? t('usage.filters.thresholdNone')
+                      : numberLabel(heatmapModel.threshold),
+                })}
+              </span>
+              <span className="ui-chip">
+                {t('usage.filters.scaleLabel', {
+                  value:
+                    heatmapScale === 'log'
+                      ? t('usage.filters.scaleLog')
+                      : t('usage.filters.scaleLinear'),
+                })}
+              </span>
+            </div>
+
+            {heatmapModel.days.length === 0 ? (
+              <EmptyBlock message={t('usage.filters.emptyHeatmap')} />
+            ) : (
+              <Heatmap
+                days={heatmapModel.days}
+                palette={heatmapPalette}
+                totalLabel={providerTokenTitle(tokenLens).toLowerCase()}
+                totalValue={heatmapModel.rawTotalInScope}
+                cellSize={14}
+                cellGap={4}
+                minWidth={1040}
+              />
+            )}
+          </>
+        ) : chartData.length === 0 ? (
           <EmptyBlock message={t('usage.noSeriesData')} />
         ) : (
-          <div className="h-96 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart
-                data={bucketedChart}
-                margin={{ top: 8, right: 12, left: 0, bottom: 0 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="label" tick={{ fill: '#94a3b8', fontSize: 11 }} minTickGap={20} />
-                <YAxis
-                  yAxisId="tokens"
-                  tick={{ fill: '#94a3b8', fontSize: 11 }}
-                  tickFormatter={tokenTickFormatter}
-                />
-                <YAxis
-                  yAxisId="cost"
-                  orientation="right"
-                  tick={{ fill: '#94a3b8', fontSize: 11 }}
-                  tickFormatter={currencyTickFormatter}
-                />
-                <Tooltip
-                  contentStyle={tooltipStyle}
-                  formatter={(value, name) =>
-                    String(name ?? '')
-                      .toLowerCase()
-                      .includes('cost')
-                      ? currencyLabel(Number(value ?? 0))
-                      : numberLabel(Number(value ?? 0))
-                  }
-                />
-                <Legend />
-
-                <Bar
-                  yAxisId="tokens"
-                  dataKey="claudeSelectedTokens"
-                  name="claude tokens"
-                  stackId="tokens"
-                  fill="#06b6d4"
-                  radius={[4, 4, 0, 0]}
-                />
-                <Bar
-                  yAxisId="tokens"
-                  dataKey="codexSelectedTokens"
-                  name="codex tokens"
-                  stackId="tokens"
-                  fill="#f59e0b"
-                  radius={[4, 4, 0, 0]}
-                />
-
-                <Line
-                  yAxisId="cost"
-                  type="monotone"
-                  dataKey="claudeCost"
-                  name="claude cost"
-                  stroke="#67e8f9"
-                  strokeWidth={1.6}
-                  dot={false}
-                />
-                <Line
-                  yAxisId="cost"
-                  type="monotone"
-                  dataKey="codexCost"
-                  name="codex cost"
-                  stroke="#fbbf24"
-                  strokeWidth={1.6}
-                  dot={false}
-                />
-                <Line
-                  yAxisId="cost"
-                  type="monotone"
-                  dataKey="totalCost"
-                  name="total cost"
-                  stroke="#34d399"
-                  strokeDasharray="4 3"
-                  strokeWidth={1.8}
-                  dot={false}
-                />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
+          <HeatmapStackedBars
+            daily={
+              heatmapMetric === 'tokens' ? heatmapStackedDaily.tokens : heatmapStackedDaily.cost
+            }
+            fromDate={chartData[0]?.date}
+            toDate={chartData[chartData.length - 1]?.date}
+            groupBy={heatmapBucket}
+            cumulative
+            // Tokens=cyan family / cost=magenta family. Per-project hue is
+            // hash-derived inside the family so adjacent projects stay
+            // distinguishable while the metric remains visually identifiable.
+            scheme={heatmapMetric === 'tokens' ? 'cyan' : 'magenta'}
+            // Composite color map. Both views share the synthetic neutrals
+            // (untracked / idle); the tokens view additionally derives a
+            // per-source variant per project — claude = base hue, codex
+            // = same hue lightened (+15) — so the user sees "this project,
+            // its claude part, its codex part" inside one segment block.
+            colorMap={cumulColorMap}
+            totalLabel={
+              heatmapMetric === 'tokens'
+                ? providerTokenTitle(tokenLens).toLowerCase()
+                : t('usage.heatmap.metricCostLabel')
+            }
+            // Cost view: render values as locale-aware EUR currency (no
+            // decimals at compact magnitudes). Header/tooltip share the
+            // same formatter as the Y-axis ticks for consistent readout.
+            valueFormatter={
+              heatmapMetric === 'cost'
+                ? (value: number) =>
+                    new Intl.NumberFormat(numberLocale(locale), {
+                      style: 'currency',
+                      currency: 'EUR',
+                      maximumFractionDigits: 0,
+                    }).format(value)
+                : undefined
+            }
+            height={360}
+          />
         )}
       </Panel>
 
@@ -1457,22 +1489,6 @@ export default function UsageRoute() {
       ) : null}
     </div>
   );
-}
-
-const tooltipStyle = {
-  backgroundColor: '#0b0d11',
-  border: '1px solid rgba(255,255,255,0.1)',
-  borderRadius: 10,
-  color: '#f5f5f7',
-  fontSize: 12,
-};
-
-function tokenTickFormatter(value: number): string {
-  return numberLabel(value);
-}
-
-function currencyTickFormatter(value: number): string {
-  return `$${value}`;
 }
 
 function Panel({

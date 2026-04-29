@@ -757,7 +757,21 @@ export const DICT_ES = {
     },
     heatmapScale: { linear: 'Escala lineal', log: 'Escala log (picos comprimidos)' },
     analyticsProvider: { claude: 'Claude JSONL', codex: 'Codex JSONL' },
-    bucket: { day: 'Día', week: 'Semana', month: 'Mes', year: 'Año' },
+    heatmap: {
+      viewGrid: 'Cuadrícula',
+      viewCumul: 'Cumul',
+      metricTokens: 'Tokens',
+      metricCost: 'Coste',
+      metricCostLabel: 'subs. real',
+      metricCostSubtitle: 'Coste suscripción real · time-weighted por proyecto',
+      untracked: 'Sin atribuir',
+      idle: 'Suscripción inactiva',
+      bucketDay: 'Día',
+      bucketWeek: 'Semana',
+      bucketBiweekly: '14 d',
+      bucketMonth: 'Mes',
+      bucketQuarter: 'Trim.',
+    },
     metrics: {
       claudeTitle: 'Claude',
       codexTitle: 'Codex',
@@ -874,11 +888,6 @@ export const DICT_ES = {
       launchAgent: 'Lanzar agente',
       usageDetails: 'Detalles Usage',
     },
-    tokensPanelTitle: 'Volumen tokens + coste',
-    tokensPanelSubtitleAll:
-      'Barras apiladas = volumen tokens por provider (activo + cache) · líneas = coste suscripción USD por provider y total.',
-    tokensPanelSubtitleActive:
-      'Barras apiladas = tokens activos por provider (input + output, cache excluido) · líneas = coste suscripción USD por provider y total.',
     noSeriesData: 'Ninguna serie disponible para esta ventana.',
     sources: {
       combined: 'Combinado',
@@ -924,6 +933,7 @@ export const DICT_ES = {
       modelsSection: 'Modelos',
       topTools: 'Top tools',
       seeMore: 'Ver más ({n} restantes)',
+      seeLess: 'Reducir',
       apiPaygHeader: 'API PAYG',
       apiPaygSub: 'pay-as-you-go',
       realAbo: 'Sub real',

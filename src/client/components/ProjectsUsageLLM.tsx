@@ -402,7 +402,10 @@ export function ProjectsUsageLLM({ projects: externalProjects }: Props) {
   const [source, setSource] = useState<Source>('combined');
   const [sortBy, setSortBy] = useState<SortKey>('tokens');
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [limit, setLimit] = useState(10);
+  // Collapsed-by-default list: only the top 3 projects render until the user
+  // explicitly expands. Mirrors the github sparklines / repos modules so the
+  // page lands compact and scannable. Toggle is binary (not paginated).
+  const [listExpanded, setListExpanded] = useState(false);
 
   const { claude, codex } = useUsageData(period, source);
   const settings = useApi<{
@@ -700,8 +703,11 @@ export function ProjectsUsageLLM({ projects: externalProjects }: Props) {
   const maxRealCost = sorted[0]?.realEur || 0;
   const maxTokens = sorted[0]?.row.totalTokens || 1;
   const barBasis = sortBy === 'cost' ? maxRealCost || 1 : maxTokens;
-  const visible = sorted.slice(0, limit);
-  const canExpand = sorted.length > limit;
+  // Top-3 collapsed, full list when expanded. The 3-cap matches the github
+  // sparklines / repos modules — keep the page compact on landing.
+  const COLLAPSED_COUNT = 3;
+  const visible = listExpanded ? sorted : sorted.slice(0, COLLAPSED_COUNT);
+  const canExpand = sorted.length > COLLAPSED_COUNT;
 
   return (
     <Section
@@ -925,8 +931,12 @@ export function ProjectsUsageLLM({ projects: externalProjects }: Props) {
 
         {canExpand ? (
           <div className="flex justify-center pt-1">
-            <Button tone="ghost" onClick={() => setLimit((l) => l + 10)}>
-              {t('usage.llmPerProject.seeMore', { n: sorted.length - limit })}
+            <Button tone="ghost" onClick={() => setListExpanded((v) => !v)}>
+              {listExpanded
+                ? t('usage.llmPerProject.seeLess')
+                : t('usage.llmPerProject.seeMore', {
+                    n: sorted.length - COLLAPSED_COUNT,
+                  })}
             </Button>
           </div>
         ) : null}

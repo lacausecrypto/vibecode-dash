@@ -757,7 +757,21 @@ export const DICT_EN = {
     },
     heatmapScale: { linear: 'Linear scale', log: 'Log scale (peaks compressed)' },
     analyticsProvider: { claude: 'Claude JSONL', codex: 'Codex JSONL' },
-    bucket: { day: 'Day', week: 'Week', month: 'Month', year: 'Year' },
+    heatmap: {
+      viewGrid: 'Grid',
+      viewCumul: 'Cumul',
+      metricTokens: 'Tokens',
+      metricCost: 'Cost',
+      metricCostLabel: 'real sub',
+      metricCostSubtitle: 'Real subscription cost · time-weighted per project',
+      untracked: 'Unattributed',
+      idle: 'Idle subscription',
+      bucketDay: 'Day',
+      bucketWeek: 'Week',
+      bucketBiweekly: '14d',
+      bucketMonth: 'Month',
+      bucketQuarter: 'Qtr.',
+    },
     metrics: {
       claudeTitle: 'Claude',
       codexTitle: 'Codex',
@@ -875,11 +889,6 @@ export const DICT_EN = {
       launchAgent: 'Launch agent',
       usageDetails: 'Usage details',
     },
-    tokensPanelTitle: 'Token volume + cost',
-    tokensPanelSubtitleAll:
-      'Stacked bars = tokens per provider (active + cache) · lines = subscription USD cost per provider and total.',
-    tokensPanelSubtitleActive:
-      'Stacked bars = active tokens per provider (input + output, cache excluded) · lines = subscription USD cost per provider and total.',
     noSeriesData: 'No series available for this window.',
     sources: {
       combined: 'Combined',
@@ -925,6 +934,7 @@ export const DICT_EN = {
       modelsSection: 'Models',
       topTools: 'Top tools',
       seeMore: 'See more ({n} remaining)',
+      seeLess: 'Collapse',
       apiPaygHeader: 'API PAYG',
       apiPaygSub: 'pay-as-you-go',
       realAbo: 'Real sub',

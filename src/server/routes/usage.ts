@@ -69,7 +69,7 @@ type CombinedDailyRow = {
 };
 
 const codexSyncInflight = new Map<string, Promise<void>>();
-// When a codex sync fails (npx codex-ccusage offline / broken / network),
+// When a codex sync fails (ccusage-codex offline / broken / network),
 // suppress re-tries until this timestamp to avoid hammering the CLI on every
 // page load. 60s is long enough to debounce but short enough that a user who
 // fixes the issue doesn't wait forever.
@@ -317,7 +317,7 @@ function loadCachedDailyRows(
  * source-of-truth refreshed by the JSONL watcher on every project scan).
  *
  * Replaces a previous read from `usage_codex_daily` which is populated by the
- * external `npx @ccusage/codex daily --json` CLI. That CLI:
+ * external `ccusage-codex daily --json` CLI. That CLI:
  *   - buckets sessions using a different tz convention, shifting rows by
  *     1 day vs what actually happened locally;
  *   - occasionally drops dates entirely when no session ended cleanly;
@@ -767,7 +767,7 @@ export function registerUsageRoutes(app: Hono): void {
     });
   });
 
-  // Both sync endpoints shell out to npx ccusage — bound to 3 per minute to
+  // Both sync endpoints shell out to ccusage CLIs — bound to 3 per minute to
   // prevent button-mashing from stacking up concurrent CLI spawns.
   const usageSyncRl = rateLimit(3, 60_000);
 
@@ -1090,6 +1090,182 @@ export function registerUsageRoutes(app: Hono): void {
       });
     } catch (error) {
       return c.json({ error: 'usage_by_project_failed', details: String(error) }, 500);
+    }
+  });
+
+  /**
+   * Daily breakdown across ALL projects, both providers folded together
+   * — feeds the usage page's cumul stacked-bars view (one segment per
+   * project). Different from `/by-project/daily` which requires a single
+   * project filter and returns a row per (date, source).
+   *
+   * Tokens (provider-normalised at ingest in `usage_daily_by_project`):
+   *   - tokensActive = input + output                       (fresh work)
+   *   - tokensAll    = active + cache_create + cache_read
+   *
+   * Cost = `realEur` = time-weighted subscription accrual in EUR.
+   *   For each (date, source) we split that day's subscription daily rate
+   *   across active projects proportionally to their fresh tokens. Same
+   *   semantics as the project list's "ABO RÉEL" column — the user is
+   *   already calibrated on this number, so the cumul cost view stacks
+   *   the SAME quantity over time. Pure pay-as-you-go USD (cost_usd) was
+   *   misleading because the dashboard primarily reports EUR sub cost.
+   */
+  app.get('/api/usage/by-project/stacked-daily', async (c) => {
+    try {
+      const db = getDb();
+      const settings = await loadSettings();
+      const range = parseRange(c.req.query('from'), c.req.query('to'), 365);
+      const fromDate = isoDateFromTs(range.fromTs);
+      const toDate = isoDateFromTs(range.toTs);
+
+      // 1) Per (date, project_key, source): tokens (active + all) + raw
+      //    key/name. Source is preserved so the client can split the
+      //    Tokens view by claude vs codex within each project segment.
+      //    Display name is derived in JS (see `displayName` below) — when
+      //    no `project_name` is set we fall back to the BASENAME of the
+      //    key, not the full path. Long absolute paths in the tooltip
+      //    legend were wrapping/truncating ("/Volumes/nvme/projet claud…").
+      const tokenRows = db
+        .query(
+          `SELECT
+             date,
+             project_key       AS projectKey,
+             source,
+             MAX(project_name) AS projectName,
+             SUM(input_tokens + output_tokens) AS tokensActive,
+             SUM(input_tokens + output_tokens + cache_create + cache_read) AS tokensAll
+           FROM usage_daily_by_project
+           WHERE date >= ? AND date <= ?
+           GROUP BY date, project_key, source
+           ORDER BY date ASC`,
+        )
+        .all(fromDate, toDate) as Array<{
+        date: string;
+        projectKey: string;
+        source: 'claude' | 'codex';
+        projectName: string | null;
+        tokensActive: number;
+        tokensAll: number;
+      }>;
+
+      const displayName = (projectName: string | null, projectKey: string): string => {
+        const trimmed = projectName?.trim();
+        if (trimmed && trimmed.length > 0) return trimmed;
+        const parts = projectKey.split('/').filter(Boolean);
+        return parts.length > 0 ? parts[parts.length - 1] : projectKey;
+      };
+
+      // 2) Per (date, project_key, source): fresh-token weight for the
+      //    accrual split. Same query shape `computeProjectAccrual` uses,
+      //    just kept day-resolution instead of being summed away.
+      const weightRows = db
+        .query(
+          `SELECT date, project_key AS projectKey, source,
+                  SUM(input_tokens + output_tokens) AS tokens
+           FROM usage_daily_by_project
+           WHERE date >= ? AND date <= ?
+           GROUP BY date, project_key, source`,
+        )
+        .all(fromDate, toDate) as Array<{
+        date: string;
+        projectKey: string;
+        source: 'claude' | 'codex';
+        tokens: number;
+      }>;
+
+      // 3) Day×source totals → daily rate × project share = per-project EUR.
+      type Bucket = { totalTokens: number; entries: Array<{ projectKey: string; tokens: number }> };
+      const byDaySource = new Map<string, Bucket>();
+      for (const r of weightRows) {
+        if (r.tokens <= 0) continue;
+        const key = `${r.date}::${r.source}`;
+        const bucket = byDaySource.get(key) ?? { totalTokens: 0, entries: [] };
+        bucket.totalTokens += r.tokens;
+        bucket.entries.push({ projectKey: r.projectKey, tokens: r.tokens });
+        byDaySource.set(key, bucket);
+      }
+      // Keyed by `${date}::${projectKey}::${source}` so the client can
+      // line up each token row (which is now per (date, project, source))
+      // with the matching accrual share without extra rebucketing.
+      const accrualByDayProjectSource = new Map<string, number>();
+      // Days where the subscription is active but NO project consumed tokens
+      // — this slice of the abo is real cash but unattributable to a project.
+      // Without it the cumul cost view systematically undercounts vs the
+      // total cash paid (see kpis.idleWithDataEur in ProjectsUsageLLM).
+      const idleByDate = new Map<string, number>(); // date → eur (sum across sources)
+
+      const enumerateDays = (fromIso: string, toIso: string): string[] => {
+        const out: string[] = [];
+        const start = new Date(`${fromIso}T00:00:00Z`);
+        const end = new Date(`${toIso}T00:00:00Z`);
+        for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+          out.push(d.toISOString().slice(0, 10));
+        }
+        return out;
+      };
+
+      const claudeCharges = settings.billingHistory?.claude || [];
+      const codexCharges = settings.billingHistory?.codex || [];
+      for (const date of enumerateDays(fromDate, toDate)) {
+        for (const source of ['claude', 'codex'] as const) {
+          const charges = source === 'claude' ? claudeCharges : codexCharges;
+          const rate = dailyRateOnDate(charges, source, date);
+          if (rate <= 0) continue;
+          const bucket = byDaySource.get(`${date}::${source}`);
+          if (bucket && bucket.totalTokens > 0) {
+            for (const e of bucket.entries) {
+              const share = rate * (e.tokens / bucket.totalTokens);
+              const k = `${date}::${e.projectKey}::${source}`;
+              accrualByDayProjectSource.set(k, (accrualByDayProjectSource.get(k) ?? 0) + share);
+            }
+          } else {
+            // Subscription active, no project active that day for this source
+            // → bucket the daily rate into the synthetic "idle" series.
+            idleByDate.set(date, (idleByDate.get(date) ?? 0) + rate);
+          }
+        }
+      }
+
+      // 4) Stitch token rows + accrual into the response shape.
+      const rows: Array<{
+        date: string;
+        project: string;
+        source: 'claude' | 'codex' | null;
+        tokensActive: number;
+        tokensAll: number;
+        realEur: number;
+      }> = tokenRows.map((r) => ({
+        date: r.date,
+        project: displayName(r.projectName, r.projectKey),
+        source: r.source,
+        tokensActive: Number(r.tokensActive ?? 0),
+        tokensAll: Number(r.tokensAll ?? 0),
+        realEur: accrualByDayProjectSource.get(`${r.date}::${r.projectKey}::${r.source}`) ?? 0,
+      }));
+      // Idle rows: source-less by design (the client folds idle across
+      // sources into a single neutral segment, no per-source split).
+      for (const [date, eur] of idleByDate.entries()) {
+        if (eur <= 0) continue;
+        rows.push({
+          date,
+          project: '__idle__',
+          source: null,
+          tokensActive: 0,
+          tokensAll: 0,
+          realEur: eur,
+        });
+      }
+
+      return c.json({
+        rows,
+        meta: { fromTs: range.fromTs, toTs: range.toTs },
+      });
+    } catch (error) {
+      return c.json(
+        { error: 'usage_by_project_stacked_daily_failed', details: String(error) },
+        500,
+      );
     }
   });
 

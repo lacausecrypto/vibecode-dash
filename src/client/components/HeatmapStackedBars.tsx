@@ -44,6 +44,20 @@ type HeatmapStackedBarsProps = {
   groupBy?: GroupBy;
   cumulative?: boolean;
   scheme?: RepoColorScheme;
+  /**
+   * Explicit colour overrides per series key. When `colorMap[key]` is set
+   * it wins over the scheme-based hash colour. Useful when callers want
+   * brand-stable colours for known keys (e.g. claude=cyan, codex=amber on
+   * the usage page) rather than hash-derived hues.
+   */
+  colorMap?: Record<string, string>;
+  /**
+   * Optional formatter applied to all displayed values: header total, Y
+   * axis ticks, tooltip rows. Defaults to locale integer formatting.
+   * Use this when the metric is a currency or has a unit — e.g. cost in
+   * EUR should render as "12,3 k €" / "152 €", not "12300" / "152".
+   */
+  valueFormatter?: (value: number) => string;
   totalLabel?: string;
   /** When provided, renders in the header instead of the auto-summed total. */
   totalValue?: number;
@@ -126,6 +140,8 @@ export function HeatmapStackedBars({
   groupBy = 'month',
   cumulative = true,
   scheme = 'github',
+  colorMap,
+  valueFormatter,
   totalLabel,
   totalValue,
   height = 220,
@@ -135,6 +151,16 @@ export function HeatmapStackedBars({
   const dtLocale = dateLocale(locale);
   const nLocale = numberLocale(locale);
   const effectiveTotalLabel = totalLabel ?? t('common.heatmapContributions');
+  // Default formatter: locale-aware integer for header + tooltip,
+  // compact ("13,9 k") for Y-axis ticks. When the caller supplies
+  // `valueFormatter` it OWNS the format everywhere — single source of
+  // truth for unit-bearing metrics (e.g. EUR currency). The caller
+  // typically picks compact + currency in one Intl.NumberFormat call
+  // which reads fine on both axes.
+  const formatValue = (value: number): string =>
+    valueFormatter ? valueFormatter(value) : numberLabel(value, nLocale);
+  const formatCompact = (value: number): string =>
+    valueFormatter ? valueFormatter(value) : compactNumberLabel(value, nLocale);
 
   /**
    * Repos sorted by their final cumulative total (largest at the BOTTOM
@@ -204,15 +230,13 @@ export function HeatmapStackedBars({
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2 text-[12px] text-[var(--text-dim)]">
         <div className="flex items-baseline gap-2">
           <span className="num text-[14px] font-semibold text-[var(--text)]">
-            {numberLabel(totalValue ?? model.totalAcrossAll, nLocale)}
+            {formatValue(totalValue ?? model.totalAcrossAll)}
           </span>
           <span>{effectiveTotalLabel}</span>
         </div>
         <div className="text-[11px] text-[var(--text-faint)]">
           {t('common.heatmapMax')} ·{' '}
-          <span className="num text-[var(--text-dim)]">
-            {numberLabel(model.maxBarHeight, nLocale)}
-          </span>
+          <span className="num text-[var(--text-dim)]">{formatValue(model.maxBarHeight)}</span>
         </div>
       </div>
 
@@ -249,7 +273,7 @@ export function HeatmapStackedBars({
               tickLine={false}
               // Compact form ("13,9 k") so 4-5-digit cumulative totals fit
               // in the gutter. Tooltip + header still show the full number.
-              tickFormatter={(v: number) => compactNumberLabel(v, nLocale)}
+              tickFormatter={(v: number) => formatCompact(v)}
               width={48}
             />
             <Tooltip
@@ -285,7 +309,7 @@ export function HeatmapStackedBars({
                   >
                     <div style={{ marginBottom: 6, opacity: 0.7 }}>{labelStr}</div>
                     <div style={{ marginBottom: 6, fontWeight: 600 }}>
-                      {numberLabel(total, nLocale)} {effectiveTotalLabel}
+                      {formatValue(total)} {effectiveTotalLabel}
                     </div>
                     {entries.slice(0, 12).map((e) => {
                       const share = total > 0 ? Math.round((e.value / total) * 100) : 0;
@@ -330,7 +354,7 @@ export function HeatmapStackedBars({
                             </span>
                           </span>
                           <span style={{ opacity: 0.85, whiteSpace: 'nowrap' }}>
-                            <span className="num">{numberLabel(e.value, nLocale)}</span>{' '}
+                            <span className="num">{formatValue(e.value)}</span>{' '}
                             <span style={{ opacity: 0.5, fontSize: 10 }}>· {share}%</span>
                           </span>
                         </div>
@@ -353,7 +377,7 @@ export function HeatmapStackedBars({
                 key={repo}
                 dataKey={repo}
                 stackId="cumul"
-                fill={repoColor(repo, scheme)}
+                fill={colorMap?.[repo] ?? repoColor(repo, scheme)}
                 isAnimationActive={false}
               />
             ))}
