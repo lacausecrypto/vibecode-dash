@@ -1,15 +1,10 @@
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, normalize, resolve } from 'node:path';
 import type { Hono } from 'hono';
 import { expandHomePath, loadSettings } from '../config';
 import { getDb } from '../db';
+import { isSubPath } from '../lib/pathGuards';
 import { buildProjectTree, scanAllProjects, scanProjectById } from '../scanners/projectScanner';
-
-function isSubPath(candidate: string, root: string): boolean {
-  const c = resolve(candidate);
-  const r = resolve(root);
-  return c === r || c.startsWith(`${r}/`);
-}
 
 // Content-type lookup for README-embedded assets. Kept deliberately narrow:
 // only image/video formats commonly found in READMEs. Anything else returns
@@ -20,7 +15,6 @@ const ASSET_MIME: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
-  '.svg': 'image/svg+xml',
   '.avif': 'image/avif',
   '.ico': 'image/x-icon',
   '.mp4': 'video/mp4',
@@ -141,7 +135,7 @@ export function registerProjectRoutes(app: Hono): void {
     const requested = isAbsolute(relParam) ? relParam : join(baseDir, relParam);
     const resolved = resolve(normalize(requested));
 
-    // Double-containment check: resolved path must sit inside BOTH the
+    // Double-containment check: requested path must sit inside BOTH the
     // project directory AND a settings-allowed root. The settings check
     // mirrors the readme endpoint's policy; the project-dir check blocks the
     // edge case where a project sits at settings-root level and `..` could
@@ -162,14 +156,30 @@ export function registerProjectRoutes(app: Hono): void {
     }
 
     try {
-      const fileStat = await stat(resolved);
+      // `readFile()` follows symlinks. Re-resolve the final target and repeat
+      // containment on real paths so a repo cannot expose `/etc/passwd` through
+      // `docs/demo.png -> /etc/passwd`.
+      const [realAsset, realProject, realAllowedRoots] = await Promise.all([
+        realpath(resolved),
+        realpath(row.path),
+        Promise.all(allowedRoots.map((root) => realpath(root).catch(() => resolve(root)))),
+      ]);
+
+      if (!isSubPath(realAsset, realProject)) {
+        return c.json({ error: 'asset_symlink_outside_project' }, 403);
+      }
+      if (!realAllowedRoots.some((root) => isSubPath(realAsset, root))) {
+        return c.json({ error: 'asset_symlink_outside_allowed_roots' }, 403);
+      }
+
+      const fileStat = await stat(realAsset);
       if (!fileStat.isFile()) {
         return c.json({ error: 'asset_not_a_file' }, 404);
       }
       if (fileStat.size > ASSET_MAX_BYTES) {
         return c.json({ error: 'asset_too_large', size: fileStat.size }, 413);
       }
-      const data = await readFile(resolved);
+      const data = await readFile(realAsset);
       return new Response(data, {
         status: 200,
         headers: {

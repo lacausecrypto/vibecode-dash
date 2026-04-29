@@ -10,10 +10,10 @@ import {
   asRecord,
   asString,
   isSubPath,
+  listRecentJsonlFiles,
   normalizeProjects,
   normalizeRoots,
   parseTimestamp,
-  runCommand,
 } from './jsonlShared';
 
 export type { KnownProject } from './jsonlShared';
@@ -210,40 +210,11 @@ async function listCandidateFiles(
   fromTs: number,
   maxFiles: number,
 ): Promise<CandidateFile[]> {
-  const script =
-    'find "$1" -type f -name "*.jsonl" -exec stat -f "%m\t%N" {} + 2>/dev/null | awk -F "\t" -v min="$2" \'$1 >= min { print }\' | sort -rn | head -n "$3"';
-
-  const result = await runCommand([
-    'sh',
-    '-lc',
-    script,
-    '_',
-    sessionsDir,
-    String(fromTs),
-    String(maxFiles),
-  ]);
-  if (result.code !== 0) {
-    return [];
-  }
-
-  const out: CandidateFile[] = [];
-  for (const line of result.stdout.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
-      continue;
-    }
-    const idx = trimmed.indexOf('\t');
-    if (idx <= 0) {
-      continue;
-    }
-    const mtime = Number.parseInt(trimmed.slice(0, idx), 10);
-    const path = trimmed.slice(idx + 1);
-    if (!Number.isFinite(mtime) || path.length === 0) {
-      continue;
-    }
-    out.push({ path, mtime });
-  }
-  return out;
+  return listRecentJsonlFiles(sessionsDir, {
+    fromTs,
+    maxFiles,
+    minDepth: 1,
+  });
 }
 
 async function readLines(path: string): Promise<string[]> {

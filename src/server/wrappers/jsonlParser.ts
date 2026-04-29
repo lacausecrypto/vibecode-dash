@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 import { expandHomePath } from '../config';
 import {
   type KnownProject,
@@ -9,10 +9,10 @@ import {
   asRecord,
   asString,
   isSubPath,
+  listRecentJsonlFiles,
   normalizeProjects,
   normalizeRoots,
   parseTimestamp,
-  runCommand,
 } from './jsonlShared';
 
 export type { KnownProject } from './jsonlShared';
@@ -302,55 +302,18 @@ async function listCandidateFiles(
   const projectsDir = resolve(expandHomePath(claudeConfigDir), 'projects');
   const commandLimit = Math.max(maxFiles * 4, maxFiles);
 
-  const script =
-    'find "$1" -mindepth 2 -maxdepth 2 -type f -name \'*.jsonl\' -exec stat -f "%m\\t%N" {} + 2>/dev/null | awk -F \'\\t\' -v min="$2" \'$1 >= min { print }\' | sort -rn | head -n "$3"';
-
-  const result = await runCommand([
-    'sh',
-    '-lc',
-    script,
-    '_',
-    projectsDir,
-    String(fromTs),
-    String(commandLimit),
-  ]);
-  if (result.code !== 0) {
-    throw new Error(result.stderr.trim() || 'list_jsonl_failed');
-  }
-
-  const lines = result.stdout
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+  const files = await listRecentJsonlFiles(projectsDir, {
+    fromTs,
+    maxFiles: commandLimit,
+    minDepth: 2,
+    maxDepth: 2,
+  });
 
   const out: CandidateFile[] = [];
-  for (const line of lines) {
-    const tabIndex = line.indexOf('\t');
-    const escapedTabIndex = line.indexOf('\\t');
-    const splitIndex = tabIndex > 0 ? tabIndex : escapedTabIndex;
-    const splitSize = tabIndex > 0 ? 1 : 2;
-    if (splitIndex <= 0) {
-      continue;
-    }
+  for (const file of files) {
+    const [projectHint = null] = relative(projectsDir, file.path).split(/[\\/]/);
 
-    const mtime = Number.parseInt(line.slice(0, splitIndex), 10);
-    const path = line.slice(splitIndex + splitSize);
-    if (!Number.isFinite(mtime) || path.length === 0) {
-      continue;
-    }
-
-    const marker = '/projects/';
-    const markerIndex = path.indexOf(marker);
-    let projectHint: string | null = null;
-    if (markerIndex >= 0) {
-      const rest = path.slice(markerIndex + marker.length);
-      const slash = rest.indexOf('/');
-      if (slash > 0) {
-        projectHint = rest.slice(0, slash);
-      }
-    }
-
-    out.push({ path, mtime, projectHint });
+    out.push({ path: file.path, mtime: file.mtime, projectHint });
     if (out.length >= maxFiles) {
       break;
     }

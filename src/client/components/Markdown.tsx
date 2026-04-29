@@ -6,6 +6,60 @@ import { AgentChartFromRaw } from './AgentChart';
 marked.setOptions({ gfm: true });
 
 const CHART_BLOCK_REGEX = /<chart\b[^>]*>[\s\S]*?<\/chart>/gi;
+const ALLOWED_TAGS = new Set([
+  'a',
+  'blockquote',
+  'br',
+  'code',
+  'del',
+  'em',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'hr',
+  'img',
+  'li',
+  'ol',
+  'p',
+  'pre',
+  'source',
+  'strong',
+  'table',
+  'tbody',
+  'td',
+  'th',
+  'thead',
+  'tr',
+  'ul',
+  'video',
+]);
+const DROP_WITH_CONTENT_TAGS = new Set([
+  'base',
+  'canvas',
+  'embed',
+  'form',
+  'iframe',
+  'link',
+  'math',
+  'meta',
+  'object',
+  'script',
+  'style',
+  'svg',
+]);
+const GLOBAL_ATTRS = new Set(['aria-label', 'aria-hidden', 'title']);
+const TAG_ATTRS: Record<string, Set<string>> = {
+  a: new Set(['href']),
+  code: new Set(['class']),
+  img: new Set(['alt', 'decoding', 'height', 'loading', 'src', 'width']),
+  source: new Set(['src', 'type']),
+  td: new Set(['align', 'colspan', 'rowspan']),
+  th: new Set(['align', 'colspan', 'rowspan']),
+  video: new Set(['controls', 'height', 'poster', 'src', 'width']),
+};
 
 type Segment = { kind: 'md'; text: string } | { kind: 'chart'; raw: string };
 
@@ -58,6 +112,70 @@ function slugify(text: string): string {
     .slice(0, 80);
 }
 
+function stripUrlControls(value: string): string {
+  return Array.from(value.trim())
+    .filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code > 0x20 && code !== 0x7f;
+    })
+    .join('');
+}
+
+function isSafeUrlAttr(tag: string, attr: string, value: string): boolean {
+  const trimmed = stripUrlControls(value);
+  if (!trimmed) return false;
+  if (trimmed.startsWith('#') || trimmed.startsWith('/') || trimmed.startsWith('./')) return true;
+
+  try {
+    const url = new URL(trimmed, window.location.origin);
+    if (attr === 'href') {
+      return url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'mailto:';
+    }
+    if (attr === 'src' || attr === 'poster') {
+      if (url.protocol === 'http:' || url.protocol === 'https:') return true;
+      if (url.protocol === 'data:' && tag === 'img') {
+        return /^data:image\/(?:png|jpe?g|gif|webp|avif);base64,/i.test(trimmed);
+      }
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
+function sanitizeDocument(doc: Document): void {
+  for (const el of Array.from(doc.body.querySelectorAll('*'))) {
+    const tag = el.tagName.toLowerCase();
+
+    if (DROP_WITH_CONTENT_TAGS.has(tag)) {
+      el.remove();
+      continue;
+    }
+
+    if (!ALLOWED_TAGS.has(tag)) {
+      el.replaceWith(...Array.from(el.childNodes));
+      continue;
+    }
+
+    const tagAttrs = TAG_ATTRS[tag] ?? new Set<string>();
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase();
+      const allowed = GLOBAL_ATTRS.has(name) || tagAttrs.has(name);
+      if (!allowed || name.startsWith('on') || name === 'style' || name === 'srcdoc') {
+        el.removeAttribute(attr.name);
+        continue;
+      }
+      if (
+        (name === 'href' || name === 'src' || name === 'poster') &&
+        !isSafeUrlAttr(tag, name, attr.value)
+      ) {
+        el.removeAttribute(attr.name);
+      }
+    }
+  }
+}
+
 // Post-process the marked-rendered HTML:
 //  1. Rewrite relative image/video src to our asset endpoint so GIFs load.
 //  2. Append the auth token as ?token=… because <img>/<video> can't send
@@ -101,6 +219,8 @@ function postProcess(html: string, projectId: string | null, apiToken: string | 
       }
     }
   }
+
+  sanitizeDocument(doc);
 
   // Heading anchors — GitHub-style. Skip if author already set an id.
   for (const tag of ['h1', 'h2', 'h3', 'h4']) {
@@ -225,7 +345,7 @@ export function Markdown({
     return (
       <article
         className={`prose-readme text-[13.5px] leading-relaxed text-[var(--text)] ${className || ''}`.trim()}
-        // biome-ignore lint/security/noDangerouslySetInnerHtml: trusted local agent output
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: sanitized marked output
         dangerouslySetInnerHTML={{ __html: html }}
       />
     );
@@ -255,7 +375,7 @@ export function Markdown({
           <Fragment key={key}>
             <article
               className="prose-readme text-[13.5px] leading-relaxed text-[var(--text)]"
-              // biome-ignore lint/security/noDangerouslySetInnerHtml: trusted local agent output
+              // biome-ignore lint/security/noDangerouslySetInnerHtml: sanitized marked output
               dangerouslySetInnerHTML={{ __html: html }}
             />
           </Fragment>

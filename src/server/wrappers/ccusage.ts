@@ -1,3 +1,7 @@
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 export type CcusageDailyRow = {
   date?: string;
   inputTokens?: number;
@@ -21,7 +25,7 @@ export type CodexCcusageDailyRow = {
 };
 
 /**
- * Hard cap on concurrent `npx ccusage` (or codex-ccusage) processes. Each
+ * Hard cap on concurrent `ccusage` (or `ccusage-codex`) processes. Each
  * one opens ~20 k FDs (every Claude JSONL session file) — without this cap,
  * three or four parallel callers will saturate `kern.maxfiles` (122 880 on
  * macOS) and trigger `ENFILE: posix_spawn '/bin/sh'` cascading errors.
@@ -30,8 +34,45 @@ export type CodexCcusageDailyRow = {
  * blocks call, far below the FD ceiling.
  */
 const MAX_CONCURRENT_CCUSAGE = 2;
+const CCUSAGE_VERSION = '18.0.11';
+const CODEX_CCUSAGE_VERSION = '18.0.11';
 let activeCcusageSpawns = 0;
 const ccusageQueue: Array<() => void> = [];
+
+function packageRootCandidates(): string[] {
+  const selfDir = dirname(fileURLToPath(import.meta.url));
+  return [
+    process.env.VIBECODEDASH_PKG_ROOT,
+    process.cwd(),
+    // Source dev: src/server/wrappers/ccusage.ts -> repo root.
+    join(selfDir, '..', '..', '..'),
+    // Built bundle: dist/server/index.js -> repo root.
+    join(selfDir, '..', '..'),
+  ].filter((value): value is string => Boolean(value));
+}
+
+function localBin(name: string): string | null {
+  const executable = process.platform === 'win32' ? `${name}.cmd` : name;
+  for (const root of packageRootCandidates()) {
+    const candidate = join(root, 'node_modules', '.bin', executable);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function ccusageArgs(subcommand: string, args: string[] = []): string[] {
+  const bin = localBin('ccusage');
+  if (bin) return [bin, subcommand, ...args];
+  return ['npx', '--yes', `ccusage@${CCUSAGE_VERSION}`, subcommand, ...args];
+}
+
+function codexCcusageArgs(subcommand: string, args: string[] = []): string[] {
+  const bin = localBin('ccusage-codex');
+  if (bin) return [bin, subcommand, ...args];
+  return ['npx', '--yes', `@ccusage/codex@${CODEX_CCUSAGE_VERSION}`, subcommand, ...args];
+}
 
 function acquireCcusageSlot(): Promise<() => void> {
   if (activeCcusageSpawns < MAX_CONCURRENT_CCUSAGE) {
@@ -148,7 +189,7 @@ const CCUSAGE_DAILY_TTL_MS = 60_000;
 const CCUSAGE_MONTHLY_TTL_MS = 5 * 60_000;
 
 export async function ccusageDaily(since?: string, until?: string): Promise<CcusageDailyRow[]> {
-  const args = ['npx', 'ccusage@latest', 'daily', '--json'];
+  const args = ccusageArgs('daily', ['--json']);
   if (since) {
     args.push('--since', since);
   }
@@ -169,14 +210,14 @@ export async function ccusageDaily(since?: string, until?: string): Promise<Ccus
 }
 
 export async function ccusageMonthly(): Promise<unknown> {
-  return cachedJsonCommand(['npx', 'ccusage@latest', 'monthly', '--json'], CCUSAGE_MONTHLY_TTL_MS);
+  return cachedJsonCommand(ccusageArgs('monthly', ['--json']), CCUSAGE_MONTHLY_TTL_MS);
 }
 
 export async function codexCcusageDaily(
   since?: string,
   until?: string,
 ): Promise<CodexCcusageDailyRow[]> {
-  const args = ['npx', '@ccusage/codex@latest', 'daily', '--json'];
+  const args = codexCcusageArgs('daily', ['--json']);
   if (since) {
     args.push('--since', since);
   }
@@ -200,14 +241,11 @@ export async function codexCcusageDaily(
 }
 
 export async function codexCcusageMonthly(): Promise<unknown> {
-  return cachedJsonCommand(
-    ['npx', '@ccusage/codex@latest', 'monthly', '--json'],
-    CCUSAGE_MONTHLY_TTL_MS,
-  );
+  return cachedJsonCommand(codexCcusageArgs('monthly', ['--json']), CCUSAGE_MONTHLY_TTL_MS);
 }
 
 export async function codexCcusageSession(since?: string, until?: string): Promise<unknown> {
-  const args = ['npx', '@ccusage/codex@latest', 'session', '--json'];
+  const args = codexCcusageArgs('session', ['--json']);
   if (since) {
     args.push('--since', since);
   }

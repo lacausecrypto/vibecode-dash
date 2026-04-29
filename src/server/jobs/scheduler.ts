@@ -70,21 +70,24 @@ export async function startScheduler(): Promise<void> {
       name: 'project_rescan',
       intervalMs: settings.schedules.projectRescanMinutes * 60_000,
       run: async () => {
-        await scanAllProjects(db, settings);
+        const live = await loadSettings();
+        await scanAllProjects(db, live);
       },
     },
     {
       name: 'github_sync',
       intervalMs: settings.schedules.githubSyncMinutes * 60_000,
       run: async () => {
-        await syncGithubAll(db, settings.github.username);
+        const live = await loadSettings();
+        await syncGithubAll(db, live.github.username);
       },
     },
     {
       name: 'obsidian_reindex',
       intervalMs: settings.schedules.obsidianSyncMinutes * 60_000,
       run: async () => {
-        await reindexObsidianVault(db, settings);
+        const live = await loadSettings();
+        await reindexObsidianVault(db, live);
       },
     },
     {

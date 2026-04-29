@@ -62,7 +62,7 @@ export async function startObsidianWatcher(): Promise<void> {
     state.running = true;
     state.lastReindexAt = Date.now();
     try {
-      await reindexObsidianVault(getDb(), settings);
+      await reindexObsidianVault(getDb(), await loadSettings());
     } catch (error) {
       console.warn('[obsidianWatcher] reindex failed:', String(error));
     } finally {

@@ -4,6 +4,7 @@ import { basename, dirname, extname, join, normalize, posix, relative, resolve }
 import matter from 'gray-matter';
 import type { Settings } from '../config';
 import { expandHomePath } from '../config';
+import { isSubPath } from '../lib/pathGuards';
 
 type RawLink = {
   target: string;
@@ -469,7 +470,7 @@ export async function reindexObsidianVault(
 export function resolveVaultPath(vaultRoot: string, notePath: string): string {
   const abs = resolve(join(vaultRoot, notePath));
   const root = resolve(vaultRoot);
-  if (!(abs === root || abs.startsWith(`${root}/`))) {
+  if (!isSubPath(abs, root)) {
     throw new Error('Path escapes vault root');
   }
   return abs;

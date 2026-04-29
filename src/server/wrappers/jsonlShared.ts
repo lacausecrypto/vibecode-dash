@@ -1,5 +1,7 @@
+import { readdir, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { expandHomePath } from '../config';
+import { isSubPath } from '../lib/pathGuards';
 
 export type KnownProject = {
   id: string;
@@ -21,6 +23,11 @@ export type ProjectIdentity = {
   projectPath: string | null;
   projectId: string | null;
   projectName: string | null;
+};
+
+export type JsonlFileCandidate = {
+  path: string;
+  mtime: number;
 };
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
@@ -61,10 +68,6 @@ export function parseTimestamp(value: unknown): number | null {
   return null;
 }
 
-export function isSubPath(candidate: string, root: string): boolean {
-  return candidate === root || candidate.startsWith(`${root}/`);
-}
-
 export function normalizeRoots(projectRoots: string[]): PreparedRoot[] {
   const out = new Map<string, PreparedRoot>();
   for (const root of projectRoots) {
@@ -84,14 +87,60 @@ export function normalizeProjects(projects: KnownProject[]): PreparedProject[] {
     .sort((a, b) => b.normalizedPath.length - a.normalizedPath.length);
 }
 
-export async function runCommand(
-  args: string[],
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, code };
+export async function listRecentJsonlFiles(
+  root: string,
+  opts: {
+    fromTs: number;
+    maxFiles: number;
+    minDepth?: number;
+    maxDepth?: number;
+  },
+): Promise<JsonlFileCandidate[]> {
+  const resolvedRoot = resolve(expandHomePath(root));
+  const minDepth = opts.minDepth ?? 1;
+  const maxDepth = opts.maxDepth ?? Number.POSITIVE_INFINITY;
+  const out: JsonlFileCandidate[] = [];
+
+  async function walk(dir: string, depth: number): Promise<void> {
+    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const full = resolve(dir, entry.name);
+      const entryDepth = depth + 1;
+
+      if (entry.isDirectory()) {
+        if (entryDepth < maxDepth) {
+          await walk(full, entryDepth);
+        }
+        continue;
+      }
+
+      if (!entry.isFile() || entryDepth < minDepth || entryDepth > maxDepth) {
+        continue;
+      }
+      if (!entry.name.endsWith('.jsonl')) {
+        continue;
+      }
+
+      try {
+        const s = await stat(full);
+        const mtime = Math.floor(s.mtimeMs / 1000);
+        if (mtime >= opts.fromTs) {
+          out.push({ path: full, mtime });
+        }
+      } catch {
+        // Ignore unreadable/raced files; next scan will pick them up.
+      }
+    }
+  }
+
+  await walk(resolvedRoot, 0);
+  return out.sort((a, b) => b.mtime - a.mtime).slice(0, opts.maxFiles);
 }
+
+export { isSubPath };

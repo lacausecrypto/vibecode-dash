@@ -29,6 +29,28 @@ if (!isProduction) {
   );
 }
 
+app.use('*', async (c, next) => {
+  await next();
+  c.header(
+    'Content-Security-Policy',
+    [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob: http: https:",
+      "media-src 'self' data: blob: http: https:",
+      "font-src 'self' data:",
+      "connect-src 'self' http://127.0.0.1:* http://localhost:*",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-ancestors 'none'",
+    ].join('; '),
+  );
+  c.header('Referrer-Policy', 'no-referrer');
+  c.header('X-Content-Type-Options', 'nosniff');
+});
+
 const authToken = loadOrCreateToken();
 app.use(
   '/api/*',
@@ -123,7 +145,7 @@ const port = Number.parseInt(process.env.PORT || '4317', 10);
 // Explicit serve() — works whether this module is the main entry (`bun
 // dist/server/index.js`) or imported from the CLI wrapper (`bin/vibecode-dash.mjs`).
 // Relying on `export default { fetch }` would only auto-start in the former case.
-// idleTimeout bumped from Bun's 10s default: several `npx ccusage*` endpoints
+// idleTimeout bumped from Bun's 10s default: several `ccusage*` endpoints
 // (by-model, hour-distribution, blocks --active) can take 6–20s on cold npm
 // cache, and the 10s default returns 500 before the command finishes.
 Bun.serve({

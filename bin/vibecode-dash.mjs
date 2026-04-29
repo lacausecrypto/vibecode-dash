@@ -78,6 +78,7 @@ if (!existsSync(SERVER_ENTRY)) {
 }
 
 process.env.NODE_ENV ??= 'production';
+process.env.VIBECODEDASH_PKG_ROOT ??= PKG_ROOT;
 if (opts.port) {
   const n = Number.parseInt(opts.port, 10);
   if (!Number.isInteger(n) || n <= 0 || n > 65535) {

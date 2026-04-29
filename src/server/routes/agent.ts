@@ -35,6 +35,7 @@ import {
 } from '../lib/memory';
 import { runMemoryPass } from '../lib/memoryPass';
 import { syncMemoriesToVault } from '../lib/memoryVaultSync';
+import { isSubPath } from '../lib/pathGuards';
 import { archiveSessionToVault } from '../lib/sessionArchive';
 import {
   type AgentExecResult,
@@ -124,14 +125,6 @@ type QuickPromptResult = {
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
-}
-
-function isSubPath(candidate: string, root: string): boolean {
-  const normalizedCandidate = resolve(candidate);
-  const normalizedRoot = resolve(root);
-  return (
-    normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}/`)
-  );
 }
 
 function parseJson<T>(raw: string | null, fallback: T): T {
