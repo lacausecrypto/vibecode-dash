@@ -300,11 +300,11 @@ export function Layout({ children }: PropsWithChildren) {
               aria-label={t('nav.menu')}
               onClick={() => setMobileNavOpen(false)}
             />
-            <aside
-              className="mobile-drawer-panel sm:hidden"
-              role="dialog"
-              aria-modal="true"
-            >
+            {/* biome-ignore lint/a11y/useSemanticElements: a native <dialog>
+                requires showModal() and conflicts with our custom CSS-driven
+                slide-in animation; <aside role="dialog"> is the documented
+                ARIA-compliant fallback for non-native modal panels. */}
+            <aside className="mobile-drawer-panel sm:hidden" role="dialog" aria-modal="true">
               <div className="mb-3 flex items-center justify-between">
                 <span className="text-[15px] font-semibold text-[var(--text)]">
                   {t('nav.menu')}

@@ -226,12 +226,17 @@ function parseLanguages(json: string | null): string {
     const parsed = JSON.parse(json) as Record<string, number> | string[];
     if (Array.isArray(parsed)) return parsed.slice(0, 5).join(', ') || '—';
     const entries = Object.entries(parsed).sort((a, b) => b[1] - a[1]);
-    return entries.slice(0, 5).map(([lang, share]) => {
-      // share might be a percentage (0-100) or a ratio (0-1) — render
-      // either form sensibly.
-      if (share <= 1) return `${lang} ${(share * 100).toFixed(0)}%`;
-      return `${lang} ${share.toFixed(0)}%`;
-    }).join(', ') || '—';
+    return (
+      entries
+        .slice(0, 5)
+        .map(([lang, share]) => {
+          // share might be a percentage (0-100) or a ratio (0-1) — render
+          // either form sensibly.
+          if (share <= 1) return `${lang} ${(share * 100).toFixed(0)}%`;
+          return `${lang} ${share.toFixed(0)}%`;
+        })
+        .join(', ') || '—'
+    );
   } catch {
     return '—';
   }
@@ -265,8 +270,23 @@ type RecapStrings = {
   llmConsumption: string;
   claudeNoActivity: string;
   codexNoActivity: string;
-  claudeUsage: (totalTok: string, inTok: string, outTok: string, cacheTok: string, sessions: number, messages: number, cost: string) => string;
-  codexUsage: (totalTok: string, inTok: string, outTok: string, sessions: number, turns: number, cost: string) => string;
+  claudeUsage: (
+    totalTok: string,
+    inTok: string,
+    outTok: string,
+    cacheTok: string,
+    sessions: number,
+    messages: number,
+    cost: string,
+  ) => string;
+  codexUsage: (
+    totalTok: string,
+    inTok: string,
+    outTok: string,
+    sessions: number,
+    turns: number,
+    cost: string,
+  ) => string;
   competitorsTitle: string;
   competitorsEmpty: string;
   whatIWant: string;
@@ -317,7 +337,7 @@ const RECAP_STRINGS: Record<RecapLocale, RecapStrings> = {
       '3. **Analyse marché** : positionnement vs concurrents listés, niches à creuser, ' +
       'risques de saturation. Si la liste est vide, propose 2-3 concurrents probables que je devrais ajouter au radar.',
     section4:
-      "4. **Audit technique éclair** : 3 hotspots (dette, sécurité, perf) que tu identifies en lisant le repo. " +
+      '4. **Audit technique éclair** : 3 hotspots (dette, sécurité, perf) que tu identifies en lisant le repo. ' +
       'Cite les fichiers et lignes précises.',
     section5:
       '5. **Verdict honnête** : `continuer` / `pivoter` / `abandonner` ? Justifie en 2-3 phrases ' +
@@ -349,7 +369,7 @@ const RECAP_STRINGS: Record<RecapLocale, RecapStrings> = {
     competitorsEmpty: 'No competitors recorded for this project.',
     whatIWant: '## What I want from you',
     brief:
-      'You have access to the repo via this session\'s `cwd` — read whatever files you find useful ' +
+      "You have access to the repo via this session's `cwd` — read whatever files you find useful " +
       '(README, package.json, src/, docs/, etc.). Reply **in English**, concrete, no fluff, ' +
       'with the following 5 sections:',
     section1:

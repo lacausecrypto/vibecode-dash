@@ -134,9 +134,7 @@ export function publishQuota(input: {
     claude: input.claude
       ? { primary: input.claude.primary, secondary: input.claude.secondary }
       : null,
-    codex: input.codex
-      ? { primary: input.codex.primary, secondary: input.codex.secondary }
-      : null,
+    codex: input.codex ? { primary: input.codex.primary, secondary: input.codex.secondary } : null,
   };
 
   for (const fn of listeners) {
