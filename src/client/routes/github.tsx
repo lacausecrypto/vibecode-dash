@@ -1099,7 +1099,7 @@ export default function GithubRoute() {
         <Card>
           <Toolbar>
             <input
-              className="min-w-[220px] flex-1"
+              className="w-full sm:min-w-[220px] sm:flex-1"
               placeholder={t('github.sparklines.filter')}
               value={sparkFilter}
               onChange={(event) => setSparkFilter(event.target.value)}
@@ -1173,7 +1173,7 @@ export default function GithubRoute() {
         <Card>
           <Toolbar>
             <input
-              className="min-w-[220px] flex-1"
+              className="w-full sm:min-w-[220px] sm:flex-1"
               placeholder={t('github.repos.filter')}
               value={query}
               onChange={(event) => setQuery(event.target.value)}

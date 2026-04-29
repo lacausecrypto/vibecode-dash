@@ -368,7 +368,7 @@ export default function ProjectsRoute() {
       >
         <Card>
           <div className="flex flex-wrap items-center gap-2">
-            <div className="relative min-w-[220px] flex-1">
+            <div className="relative w-full sm:min-w-[220px] sm:flex-1">
               <input
                 id="project-search"
                 ref={searchRef}

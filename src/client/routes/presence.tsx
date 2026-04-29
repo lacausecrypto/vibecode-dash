@@ -1971,7 +1971,12 @@ function DraftCard({
         />
       ) : null}
 
-      <footer className="mt-3 flex flex-wrap items-center justify-end gap-1 border-t border-[var(--border)] pt-2">
+      {/* Footer actions: 6-9 buttons depending on platform + draft state.
+          flex-wrap keeps them stacking cleanly on mobile (3-row stack
+          ~300px) instead of overflowing horizontally. justify-start on
+          mobile so wrapped rows align left, justify-end on desktop so
+          the cluster anchors right. */}
+      <footer className="mt-3 flex flex-wrap items-center justify-start gap-1 border-t border-[var(--border)] pt-2 sm:justify-end">
         {draft.status === 'proposed' || draft.status === 'viewed' ? (
           <>
             {editing ? (
@@ -2836,7 +2841,7 @@ function SourcesView({
           <Empty>{t('presence.sources.emptyList')}</Empty>
         ) : (
           <div className="overflow-x-auto rounded-[var(--radius-sm)] border border-[var(--border)]">
-            <table className="w-full border-collapse text-[12px]">
+            <table className="w-full min-w-[520px] border-collapse text-[12px]">
               <thead>
                 <tr className="bg-[var(--surface-2)] text-[var(--text-mute)]">
                   <th className="px-2 py-1.5 text-left font-medium">
@@ -3104,8 +3109,12 @@ function StatsView({
               primary number + secondary hint underneath. drafts_total
               moves into the Posted card as denominator; sub_leverage and
               avg_edit_ratio stay because they answer "is this profitable"
-              and "is the drafter learning my voice". */}
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              and "is the drafter learning my voice".
+              Responsive: 2-col on phone (default), 4-col on tablet
+              landscape and up. The previous 2→4 jump at md (768px) left
+              tablet portrait without an intermediate band; sm at 640px
+              still sticks to 2 cols (cards stay readable), md goes to 4. */}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 md:grid-cols-4">
             <StatHero
               label={t('presence.stats.totals.posted')}
               value={String(stats.totals.drafts_posted)}
@@ -3503,7 +3512,7 @@ function FormatEngagementTable({
 }) {
   return (
     <div className="overflow-x-auto rounded-[var(--radius-sm)] border border-[var(--border)]">
-      <table className="w-full border-collapse text-[11px]">
+      <table className="w-full min-w-[460px] border-collapse text-[11px]">
         <thead>
           <tr className="bg-[var(--surface-2)] text-[var(--text-mute)]">
             <th className="px-2 py-1.5 text-left font-medium">
@@ -3553,7 +3562,7 @@ function FormatEngagementTable({
 function ScoreBandsTable({ rows, t }: { rows: ScoreBandRow[]; t: Translator }) {
   return (
     <div className="overflow-x-auto rounded-[var(--radius-sm)] border border-[var(--border)]">
-      <table className="w-full border-collapse text-[11px]">
+      <table className="w-full min-w-[460px] border-collapse text-[11px]">
         <thead>
           <tr className="bg-[var(--surface-2)] text-[var(--text-mute)]">
             <th className="px-2 py-1.5 text-left font-medium">
@@ -3618,7 +3627,7 @@ function TranslationStatsTable({
 }) {
   return (
     <div className="overflow-x-auto rounded-[var(--radius-sm)] border border-[var(--border)]">
-      <table className="w-full border-collapse text-[11px]">
+      <table className="w-full min-w-[460px] border-collapse text-[11px]">
         <thead>
           <tr className="bg-[var(--surface-2)] text-[var(--text-mute)]">
             <th className="px-2 py-1.5 text-left font-medium">
@@ -3701,12 +3710,23 @@ function StatHero({
             ? 'text-[#ff453a]'
             : 'text-[var(--text)]';
   return (
-    <div className="rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-1)] p-3">
-      <div className="text-[10px] uppercase tracking-wide text-[var(--text-mute)]">{label}</div>
-      <div className={`mt-1 text-[20px] font-semibold leading-tight num ${valueColor}`}>
+    <div className="min-w-0 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-1)] p-3">
+      <div className="truncate text-[10px] uppercase tracking-wide text-[var(--text-mute)]">
+        {label}
+      </div>
+      {/* truncate on the value too — long currency strings ($1,234.5678)
+          should clip rather than push the card wider than its grid track.
+          Title attribute exposes the full value on hover for desktop and
+          on long-press for mobile. */}
+      <div
+        className={`mt-1 truncate text-[18px] sm:text-[20px] font-semibold leading-tight num ${valueColor}`}
+        title={value}
+      >
         {value}
       </div>
-      {hint ? <div className="mt-1 text-[11px] text-[var(--text-faint)]">{hint}</div> : null}
+      {hint ? (
+        <div className="mt-1 text-[11px] leading-snug text-[var(--text-faint)]">{hint}</div>
+      ) : null}
     </div>
   );
 }
@@ -3818,7 +3838,7 @@ function EngagementAggregateTable({
   const showImpressions = rows.some((r) => r.avg_impressions != null);
   return (
     <div className="overflow-x-auto rounded-[var(--radius-sm)] border border-[var(--border)]">
-      <table className="w-full border-collapse text-[12px]">
+      <table className="w-full min-w-[520px] border-collapse text-[12px]">
         <thead>
           <tr className="bg-[var(--surface-2)] text-[var(--text-mute)]">
             <th className="px-2 py-1.5 text-left font-medium">
@@ -4055,7 +4075,7 @@ function LatestEngagementTable({
 
   return (
     <div className="overflow-x-auto rounded-[var(--radius-sm)] border border-[var(--border)]">
-      <table className="w-full border-collapse text-[12px]">
+      <table className="w-full min-w-[520px] border-collapse text-[12px]">
         <thead>
           <tr className="bg-[var(--surface-2)] text-[var(--text-mute)]">
             <th className="px-3 py-2 text-left font-medium">

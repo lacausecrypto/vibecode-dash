@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Heatmap } from '../components/Heatmap';
 import { Markdown } from '../components/Markdown';
 import { Button, Card, Chip, Empty, ErrorBanner, Section, Stat } from '../components/ui';
@@ -661,13 +661,71 @@ function HeroBar({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <Link to={`/agent?projectId=${project.id}`}>
-          <Button tone="accent">{t('projects.detail.askAgent')}</Button>
-        </Link>
+        <AskAgentButton projectId={project.id} label={t('projects.detail.askAgent')} />
         <Button tone="ghost" onClick={onRescan}>
           {t('projects.detail.rescan')}
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Wraps the project-detail "Ask agent" CTA. On click:
+ *  1. POST /api/agent/projects/:id/quick-recap → server gathers data,
+ *     picks a random recent model, creates the session, returns the seed.
+ *  2. Stash {sessionId, seedPrompt} in sessionStorage so the agent route
+ *     can fire the first message exactly once on landing.
+ *  3. Persist sessionId in localStorage (the agent route reads this on
+ *     mount to restore the active session) and navigate.
+ *
+ * Self-contained state (loading/error) so callers don't need to plumb
+ * status reporting from the parent.
+ */
+function AskAgentButton({ projectId, label }: { projectId: string; label: string }) {
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function onClick() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await apiPost<{
+        sessionId: string;
+        seedPrompt: string;
+        model: string;
+        provider: 'claude' | 'codex';
+      }>(`/api/agent/projects/${projectId}/quick-recap`, {});
+
+      // Stash the seed for the agent route to consume on landing. We use
+      // sessionStorage rather than a query param so the prompt (often a
+      // few KB) doesn't blow up the URL or land in browser history.
+      sessionStorage.setItem(
+        'agent.autosend',
+        JSON.stringify({ sessionId: res.sessionId, seedPrompt: res.seedPrompt }),
+      );
+      // The agent route restores its selected session from localStorage
+      // on mount — match that key so the new session is the one shown.
+      localStorage.setItem('agent.sessionId', res.sessionId);
+
+      navigate('/agent');
+    } catch (err) {
+      setError(String(err));
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <Button tone="accent" onClick={onClick} disabled={loading}>
+        {loading ? '…' : label}
+      </Button>
+      {error ? (
+        <span className="text-[10px] text-[#ff453a]" title={error}>
+          erreur — réessaie
+        </span>
+      ) : null}
     </div>
   );
 }

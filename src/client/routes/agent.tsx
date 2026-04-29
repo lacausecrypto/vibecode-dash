@@ -921,6 +921,12 @@ export default function AgentRoute() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [sessionDetail?.messages.length]);
 
+  // Auto-send guard: ensures the seed prompt fires exactly once per
+  // page load, even if the session-detail effect re-runs (it would on
+  // every selectedSessionId change). Stored as a Set of sessionIds we've
+  // already auto-sent for during this mount.
+  const autosendFiredRef = useRef<Set<string>>(new Set());
+
   useEffect(() => {
     if (streamingText.length === 0) {
       return;
@@ -1244,6 +1250,39 @@ export default function AgentRoute() {
   function stopGeneration() {
     streamAbortRef.current?.abort();
   }
+
+  // Quick-recap autosend hook. Triggered when the project-detail "Ask
+  // agent" button created a session server-side and stashed the seed
+  // prompt in sessionStorage before navigating here. Fires exactly once
+  // per session: we wait until the matching session detail is loaded
+  // and confirmed empty (zero messages) before dispatching, so we never
+  // append to a session that already has a conversation.
+  useEffect(() => {
+    if (running) return;
+    if (!sessionDetail || !selectedSessionId) return;
+    if (sessionDetail.session.id !== selectedSessionId) return;
+    if (sessionDetail.messages.length > 0) return;
+    if (autosendFiredRef.current.has(selectedSessionId)) return;
+
+    const raw = sessionStorage.getItem('agent.autosend');
+    if (!raw) return;
+
+    try {
+      const parsed = JSON.parse(raw) as { sessionId?: string; seedPrompt?: string };
+      if (parsed.sessionId !== selectedSessionId || !parsed.seedPrompt) return;
+
+      // Mark fired BEFORE clearing storage and dispatching, so a fast
+      // re-render can't double-fire if React re-runs this effect with
+      // the same deps before sendMessage's own state update lands.
+      autosendFiredRef.current.add(selectedSessionId);
+      sessionStorage.removeItem('agent.autosend');
+
+      void sendMessage(parsed.seedPrompt, 'chat');
+    } catch {
+      // Malformed payload — clear it so we don't keep retrying.
+      sessionStorage.removeItem('agent.autosend');
+    }
+  }, [sessionDetail, selectedSessionId, running, sendMessage]);
 
   async function sendPrompt() {
     await sendMessage(prompt);

@@ -7,6 +7,12 @@ import { todayIso } from '../../shared/dates';
 import { type Settings, expandHomePath, loadSettings } from '../config';
 import { getDb } from '../db';
 import { getMergedAgentModels } from '../lib/agentModels';
+import {
+  type RecapLocale,
+  buildRecapPrompt,
+  gatherProjectRecapDataAsync,
+  pickRandomRecapModel,
+} from '../lib/agentRecap';
 import { getTokenPath, loadOrCreateToken } from '../lib/auth';
 import {
   RECENT_TURNS,
@@ -1281,6 +1287,65 @@ export function registerAgentRoutes(app: Hono): void {
       }
 
       return c.json({ error: 'session_create_failed', details: String(error) }, 500);
+    }
+  });
+
+  /**
+   * Quick-recap automation for the project-detail "Ask agent" button.
+   *
+   * Aggregates project data + LLM usage + competitors, picks a random
+   * recent model, and creates a fresh session pre-loaded with the
+   * structured seed prompt. The client receives `{ sessionId, seedPrompt }`
+   * and is responsible for navigating to /agent and dispatching the
+   * first message via the streaming endpoint — keeps this handler
+   * synchronous and avoids holding a long-running stream open here.
+   */
+  app.post('/api/agent/projects/:id/quick-recap', async (c) => {
+    const projectId = c.req.param('id');
+    try {
+      const db = getDb();
+      const recapData = await gatherProjectRecapDataAsync(db, projectId);
+      if (!recapData) {
+        return c.json({ error: 'project_not_found' }, 404);
+      }
+
+      const settings = await loadSettings();
+      // The project's own path is always allowed for this session — even
+      // if the user's projectsRoots config doesn't list its parent
+      // directly, the project exists in our DB so we trust it.
+      const cwd = normalizeAllowedCwd(settings, recapData.project.path);
+
+      const model = pickRandomRecapModel();
+      // Resolve the dashboard locale from settings — drives both the
+      // prompt language AND the language we instruct the agent to reply
+      // in. Falls back to 'fr' inside currentLocale on read failure.
+      const locale = (await currentLocale()) as RecapLocale;
+      const seedPrompt = buildRecapPrompt(recapData, locale);
+
+      const session = insertSession(db, {
+        provider: model.provider,
+        cwd,
+        model: model.id,
+        title: `Recap: ${recapData.project.name}`,
+        context: {
+          // Tag so we can later filter / instrument these auto-sessions
+          // separately from human-driven ones in usage analytics.
+          source: 'quick-recap',
+          projectId: recapData.project.id,
+        },
+      });
+
+      return c.json({
+        sessionId: session.id,
+        seedPrompt,
+        model: model.id,
+        provider: model.provider,
+      });
+    } catch (error) {
+      if (String(error).includes('cwd_not_allowed')) {
+        return c.json({ error: 'cwd_not_allowed' }, 400);
+      }
+      return c.json({ error: 'recap_failed', details: String(error) }, 500);
     }
   });
 

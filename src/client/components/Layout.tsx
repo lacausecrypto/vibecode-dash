@@ -5,6 +5,7 @@ import { useTranslation } from '../lib/i18n';
 import { type ActionId, formatBinding, useBindings, useShortcut } from '../lib/shortcuts';
 import { Mascot } from './Mascot';
 import { MenuUsageMini } from './MenuUsageMini';
+import { MobileQuickBar } from './MobileQuickBar';
 import { PresenceBadge } from './PresenceBadge';
 import { Dot } from './ui';
 
@@ -36,6 +37,24 @@ export function Layout({ children }: PropsWithChildren) {
   const [healthStatus, setHealthStatus] = useState<'checking' | 'ok' | 'down'>('checking');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [presenceFeed, setPresenceFeed] = useState<PresenceFeedSummary | null>(null);
+
+  // Auto-close the mobile drawer whenever the route changes. Without this,
+  // tapping a nav link would navigate but leave the drawer covering the
+  // page content. Also closes if the user resizes past the md breakpoint
+  // (rare but tidy — drawer state should only matter while < 768px).
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
+
+  // Close on Escape — keyboard accessibility for the modal-ish drawer.
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMobileNavOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mobileNavOpen]);
   // Track the previous summary so we can detect deltas and emit a
   // notification activity when something newly noteworthy lands (drives
   // the Mascot's notification sprite). We use a ref instead of state
@@ -176,49 +195,57 @@ export function Layout({ children }: PropsWithChildren) {
       </a>
 
       <header className="app-header">
-        <div className="mx-auto flex max-w-[1280px] items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setMobileNavOpen((value) => !value)}
-              className="btn btn-ghost md:hidden"
-              aria-label="Toggle navigation"
-            >
-              {t('nav.menu')}
-            </button>
+        <div className="mx-auto flex max-w-[1280px] flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setMobileNavOpen((value) => !value)}
+                className="btn btn-ghost sm:hidden"
+                aria-label="Toggle navigation"
+              >
+                {t('nav.menu')}
+              </button>
 
-            <div className="flex items-baseline gap-3">
-              <span className="text-[15px] font-semibold tracking-tight text-[var(--text)]">
-                Dashboard
+              <div className="flex items-baseline gap-3">
+                <span className="text-[15px] font-semibold tracking-tight text-[var(--text)]">
+                  Dashboard
+                </span>
+                <span className="text-[13px] text-[var(--text-dim)]">
+                  {activeNav?.label || t('nav.overview')}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="chip">
+                <Dot
+                  tone={
+                    healthStatus === 'ok' ? 'success' : healthStatus === 'down' ? 'danger' : 'warn'
+                  }
+                />
+                <span className="text-[11px]">api {healthStatus}</span>
               </span>
-              <span className="text-[13px] text-[var(--text-dim)]">
-                {activeNav?.label || t('nav.overview')}
-              </span>
+              <span className="chip chip-muted hidden sm:inline-flex">127.0.0.1</span>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="chip">
-              <Dot
-                tone={
-                  healthStatus === 'ok' ? 'success' : healthStatus === 'down' ? 'danger' : 'warn'
-                }
-              />
-              <span className="text-[11px]">api {healthStatus}</span>
-            </span>
-            <span className="chip chip-muted hidden sm:inline-flex">127.0.0.1</span>
-          </div>
+          {/* Second row: mascot + Claude/Codex 5h gauges. Self-hides at
+              ≥sm via CSS media query — visible only on mobile where the
+              sidebar is replaced by the drawer. Tap → /usage detail page.
+              (Drawer/nav stays accessible via the Menu hamburger above.) */}
+          <MobileQuickBar />
         </div>
       </header>
 
       <div
-        className={`grid grid-cols-1 gap-4 py-4 md:grid-cols-[200px_minmax(0,1fr)] ${
+        className={`grid grid-cols-1 gap-4 py-4 sm:grid-cols-[200px_minmax(0,1fr)] ${
           isFullBleed
             ? 'px-3'
-            : 'mx-auto max-w-[1280px] gap-6 px-6 py-6 md:grid-cols-[220px_minmax(0,1fr)]'
+            : 'mx-auto max-w-[1280px] gap-6 px-6 py-6 sm:grid-cols-[200px_minmax(0,1fr)] md:grid-cols-[220px_minmax(0,1fr)]'
         }`}
       >
-        <aside className="app-sidebar hidden md:block">
+        <aside className="app-sidebar hidden sm:block">
           <div className="mb-2 flex items-center justify-center">
             <Mascot size={96} />
           </div>
@@ -260,27 +287,61 @@ export function Layout({ children }: PropsWithChildren) {
           </div>
         </aside>
 
+        {/* Mobile drawer: overlay + slide-in panel. Pulled OUT of the
+            grid layout (was creating a layout shift) and rendered as a
+            fixed-position overlay so the underlying main content keeps
+            its position. Click on overlay closes; Escape closes; route
+            change auto-closes (effect above). */}
         {mobileNavOpen ? (
-          <aside className="app-sidebar md:hidden">
-            <nav className="flex flex-col gap-0.5">
-              {nav.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.to === '/'}
+          <>
+            <button
+              type="button"
+              className="mobile-drawer-overlay sm:hidden"
+              aria-label={t('nav.menu')}
+              onClick={() => setMobileNavOpen(false)}
+            />
+            <aside
+              className="mobile-drawer-panel sm:hidden"
+              role="dialog"
+              aria-modal="true"
+            >
+              <div className="mb-3 flex items-center justify-between">
+                <span className="text-[15px] font-semibold text-[var(--text)]">
+                  {t('nav.menu')}
+                </span>
+                <button
+                  type="button"
                   onClick={() => setMobileNavOpen(false)}
-                  className="nav-item"
-                  data-active={
-                    location.pathname === item.to ||
-                    (item.to !== '/' && location.pathname.startsWith(item.to))
-                  }
+                  className="btn btn-ghost !py-1 !text-[12px]"
+                  aria-label="Close navigation"
                 >
-                  <span>{item.label}</span>
-                  <kbd>{item.hint}</kbd>
-                </NavLink>
-              ))}
-            </nav>
-          </aside>
+                  ×
+                </button>
+              </div>
+              <nav className="flex flex-col gap-0.5">
+                {nav.map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.to === '/'}
+                    className="nav-item"
+                    data-active={
+                      location.pathname === item.to ||
+                      (item.to !== '/' && location.pathname.startsWith(item.to))
+                    }
+                  >
+                    <span className="flex items-center gap-1.5">
+                      {item.label}
+                      {item.key === 'presence' && presenceFeed ? (
+                        <PresenceBadge summary={presenceFeed} />
+                      ) : null}
+                    </span>
+                    <kbd>{item.hint}</kbd>
+                  </NavLink>
+                ))}
+              </nav>
+            </aside>
+          </>
         ) : null}
 
         <main id="main-content" className="app-main !px-0 !pt-0">

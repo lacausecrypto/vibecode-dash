@@ -128,6 +128,177 @@ kbd {
   padding: 0;
 }
 
+/* ============== Mobile drawer (< sm) ============== */
+
+/* Click-to-close transparent overlay behind the drawer panel.
+   Rendered as a button so keyboard + screen reader users get the same
+   close affordance as a tap. Scoped to < sm via media query so a stale
+   open state can never bleed onto desktop after a resize. */
+.mobile-drawer-overlay,
+.mobile-drawer-panel {
+  display: none;
+}
+
+@media (max-width: 639.98px) {
+  .mobile-drawer-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    background: rgba(0, 0, 0, 0.42);
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+    border: 0;
+    cursor: pointer;
+    animation: mobile-drawer-fade-in 160ms ease-out;
+  }
+
+  /* Slide-in left panel hosting nav + quotas at narrow widths.
+     width clamps to 86vw so a sliver of the page peeks behind the panel —
+     visual cue that you can tap-to-close without a hard cut. */
+  .mobile-drawer-panel {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 46;
+    width: min(86vw, 320px);
+    padding: 14px 14px 24px;
+    background: var(--surface-1);
+    border-right: 1px solid var(--border-strong);
+    overflow-y: auto;
+    animation: mobile-drawer-slide-in 200ms cubic-bezier(0.22, 0.8, 0.32, 1);
+    box-shadow: 30px 0 60px -20px rgba(0, 0, 0, 0.6);
+  }
+}
+
+@keyframes mobile-drawer-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes mobile-drawer-slide-in {
+  from {
+    transform: translateX(-12px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* ============== Mobile quick-bar (< sm) ============== */
+
+/* Sticky strip below the header. Keeps mascot + 5h gauges visible at
+   narrow widths where the sidebar collapses into the drawer. The whole
+   strip is a button — tap anywhere opens the drawer for full nav and
+   the 7d gauges. Layout is a 3-zone flex: mascot, gauges (flex-1), hint.
+   Hidden by default; the < sm media query below opts it in so we don't
+   race Tailwind's utility cascade order (display: flex here vs.
+   sm:hidden utility could fight depending on layer ordering). */
+.mobile-quickbar {
+  display: none;
+}
+
+@media (max-width: 639.98px) {
+  .mobile-quickbar {
+    /* Lives inside the (already-sticky) app-header as a second row, so
+       no own positioning / backdrop needed. A subtle top divider sets
+       it apart from the title/status row above. Background tint on
+       hover keeps the tap-affordance discoverable. */
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 6px 0 2px;
+    border: 0;
+    border-top: 1px solid var(--border);
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    transition: background 120ms ease;
+  }
+  .mobile-quickbar:hover {
+    background: rgba(255, 255, 255, 0.02);
+  }
+}
+
+.mobile-quickbar-mascot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+/* Two gauges share the row at flex-1 each — equal split avoids one
+   provider squeezing the other when one label is longer than the other. */
+.mobile-quickbar-bars {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mobile-quickbar-gauge {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mobile-quickbar-gauge-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.mobile-quickbar-gauge-label {
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mobile-quickbar-gauge-value {
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.mobile-quickbar-gauge-track {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.mobile-quickbar-gauge-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  transition: width 240ms ease;
+}
+
+.mobile-quickbar-hint {
+  flex: 0 0 auto;
+  font-size: 14px;
+  color: var(--text-dim);
+  margin-left: 2px;
+}
+
 /* ============== Agent page layout ============== */
 
 .agent-shell {
@@ -319,10 +490,23 @@ kbd {
 
 .section-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
   padding-bottom: 2px;
+}
+
+/* Below sm, force a stack instead of relying on flex-wrap. Action
+   blocks (Segmented with 7 tabs) have a natural width that's larger
+   than typical mobile viewports — wrapping works in theory but the
+   shrink-0 + max-w-full + overflow-x-auto combo can race with flex
+   sizing in some browsers. Stacking removes the ambiguity. */
+@media (max-width: 640px) {
+  .section-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 .section-title {

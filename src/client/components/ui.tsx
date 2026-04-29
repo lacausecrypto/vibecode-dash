@@ -33,11 +33,26 @@ export function Section({
     <section className={`section ${className || ''}`.trim()}>
       {title || meta || action ? (
         <div className="section-head">
-          <div className="flex flex-col gap-0.5">
+          {/* Title block: flex-1 + min-w-0 lets it own the available row
+              width but ALSO shrink past content size when the action is
+              wider — without min-w-0 it would block the action from ever
+              shrinking and we'd get word-by-word wrap on the title. */}
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             {title ? <h2 className="section-title">{title}</h2> : null}
             {meta ? <div className="section-meta">{meta}</div> : null}
           </div>
-          {action ? <div className="flex items-center gap-2">{action}</div> : null}
+          {/* Action block: flex-shrink-0 keeps the action's natural width
+              (a Segmented with 7 tabs needs all its width to render). When
+              total width > container, section-head's flex-wrap kicks in
+              and the action wraps to its own row. max-w-full + overflow-
+              x-auto handle the still-wider case (tab strip > viewport) by
+              letting the action scroll internally instead of overflowing
+              the section box and breaking siblings. */}
+          {action ? (
+            <div className="flex max-w-full shrink-0 items-center gap-2 overflow-x-auto">
+              {action}
+            </div>
+          ) : null}
         </div>
       ) : null}
       {children}

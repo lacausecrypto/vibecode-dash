@@ -985,21 +985,32 @@ const UsageRow = memo(function UsageRow({
         aria-controls={`${headerId}-detail`}
         className="w-full px-3 py-2 text-left"
       >
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        {/* Layout strategy: stack column on mobile, row+wrap on sm+.
+            On mobile the left zone (name + chips + path) gets full width
+            so the project name doesn't word-wrap word-by-word, and the
+            KPI strip below switches to a 3-col grid that fits ~360 px
+            viewports without forcing each cell to its rigid min-w. */}
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="truncate text-[14px] font-medium text-[var(--text)]" id={headerId}>
+              <span
+                className="truncate text-[14px] font-medium text-[var(--text)]"
+                id={headerId}
+                title={row.projectName}
+              >
                 {row.projectName}
               </span>
               {hasClaude ? <Chip tone="accent">Claude</Chip> : null}
               {hasCodex ? <Chip tone="warn">Codex</Chip> : null}
               {row.topModel ? (
-                <span className="text-[11px] text-[var(--text-dim)]">{row.topModel}</span>
+                <span className="truncate text-[11px] text-[var(--text-dim)]">{row.topModel}</span>
               ) : null}
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-dim)]">
               {row.projectPath ? (
-                <span className="truncate max-w-[260px]">{row.projectPath}</span>
+                <span className="truncate max-w-full sm:max-w-[260px]" title={row.projectPath}>
+                  {row.projectPath}
+                </span>
               ) : null}
               <span>·</span>
               <span>{relativeTime(row.lastTs, t)}</span>
@@ -1012,14 +1023,19 @@ const UsageRow = memo(function UsageRow({
             </div>
           </div>
 
-          <div className="flex items-center gap-3 text-right text-[12px] text-[var(--text-mute)]">
-            <div className="min-w-[56px]">
+          {/* On mobile this is a 3-col grid (Msg/Tokens/Dev row 1, API/Abo row 2)
+              left-aligned. From sm+ it reverts to the original right-aligned
+              flex with the desktop min-widths. The Dev cell's left border is
+              also gated to sm+ since it makes no sense as a cell separator
+              inside the grid layout. */}
+          <div className="grid w-full grid-cols-3 gap-x-3 gap-y-2 text-left text-[12px] text-[var(--text-mute)] sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:justify-end sm:gap-3 sm:text-right">
+            <div className="sm:min-w-[56px]">
               <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
                 Msg
               </div>
               <div className="num text-[12px] text-[var(--text)]">{formatCount(row.messages)}</div>
             </div>
-            <div className="min-w-[64px]">
+            <div className="sm:min-w-[64px]">
               <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
                 Tokens
               </div>
@@ -1028,7 +1044,7 @@ const UsageRow = memo(function UsageRow({
               </div>
             </div>
             <div
-              className="min-w-[88px] border-l border-[var(--border)] pl-3"
+              className="sm:min-w-[88px] sm:border-l sm:border-[var(--border)] sm:pl-3"
               title={`${t('projects.detail.costs.devEquiv')}: ${formatEur(devEur, locale)} (${t('projects.detail.costs.devEquivHintRange', { low: formatEur(effort.lowEur, locale), high: formatEur(effort.highEur, locale) })})`}
             >
               <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
@@ -1041,7 +1057,7 @@ const UsageRow = memo(function UsageRow({
                 {formatHours(devHours, locale)}
               </div>
             </div>
-            <div className="min-w-[88px]">
+            <div className="sm:min-w-[88px]">
               <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
                 {t('usage.llmPerProject.rowApiLabel')}
               </div>
@@ -1052,7 +1068,7 @@ const UsageRow = memo(function UsageRow({
                 {t('usage.llmPerProject.apiPaygSub')}
               </div>
             </div>
-            <div className="min-w-[88px]">
+            <div className="sm:min-w-[88px]">
               <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
                 {t('usage.llmPerProject.rowAboLabel')}
               </div>

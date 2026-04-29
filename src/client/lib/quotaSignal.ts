@@ -15,6 +15,17 @@
 export type ProviderName = 'claude' | 'codex';
 export type QuotaSeverity = 'ok' | 'warn' | 'critical';
 
+export type QuotaBar = {
+  usedPercent: number;
+  windowMinutes: number;
+  resetsAt: number;
+} | null;
+
+export type QuotaProvider = {
+  primary: QuotaBar; // 5h window typically
+  secondary: QuotaBar; // 7d window typically
+} | null;
+
 export type QuotaSnapshot = {
   // Highest utilization across both providers and both windows (5h, 7d).
   // Drives the mascot's "worried" reactions — picks the worst signal so a
@@ -24,6 +35,10 @@ export type QuotaSnapshot = {
   worstWindowMinutes: number | null;
   severity: QuotaSeverity;
   observedAt: number; // epoch ms — lets consumers age out stale snapshots
+  // Raw per-provider bars — exposed so secondary consumers (the mobile
+  // quickbar) can render the actual values without duplicating the fetch.
+  claude: QuotaProvider;
+  codex: QuotaProvider;
 };
 
 const WARN_THRESHOLD = 0.85;
@@ -35,6 +50,8 @@ let current: QuotaSnapshot = {
   worstWindowMinutes: null,
   severity: 'ok',
   observedAt: 0,
+  claude: null,
+  codex: null,
 };
 
 type Listener = (snapshot: QuotaSnapshot) => void;
@@ -114,6 +131,12 @@ export function publishQuota(input: {
     worstWindowMinutes: worstWin,
     severity,
     observedAt: input.at,
+    claude: input.claude
+      ? { primary: input.claude.primary, secondary: input.claude.secondary }
+      : null,
+    codex: input.codex
+      ? { primary: input.codex.primary, secondary: input.codex.secondary }
+      : null,
   };
 
   for (const fn of listeners) {
