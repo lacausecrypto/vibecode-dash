@@ -437,6 +437,97 @@ export function sanitizeStderr(input: string): string {
   return out;
 }
 
+/**
+ * Walk the codex NDJSON stdout looking for `type:"error"` or
+ * `type:"turn.failed"` events and return the most actionable message
+ * found. The codex CLI 0.121+ emits the real upstream API error here,
+ * NOT in stderr — stderr contains rmcp transport noise (mcp plugin
+ * handshake races) that's secondary to the user's actual problem.
+ *
+ * The `message` field is sometimes a plain string, sometimes a JSON-
+ * encoded {error: {message: ...}} envelope (when codex re-serialises
+ * the OpenAI 4xx response). We unwrap one level deep when we see that.
+ *
+ * Returns null when no error event is present.
+ */
+function extractCodexErrorFromStdout(stdout: string): string | null {
+  if (!stdout) return null;
+  const lines = stdout.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const row = parsed as Record<string, unknown> | null;
+    if (!row || typeof row !== 'object') continue;
+    const type = typeof row.type === 'string' ? row.type : '';
+    if (type !== 'error' && type !== 'turn.failed') continue;
+
+    // turn.failed wraps the message inside `error.message`; type:error
+    // sometimes nests via `error.message` and sometimes via `message`.
+    const errObj = row.error as Record<string, unknown> | undefined;
+    const candidate =
+      (errObj && typeof errObj.message === 'string' ? errObj.message : null) ??
+      (typeof row.message === 'string' ? row.message : null);
+    if (!candidate) continue;
+
+    // The candidate is sometimes a JSON-encoded envelope itself:
+    //   "{\"type\":\"error\",\"status\":400,\"error\":{\"message\":\"...\"}}"
+    // Unwrap one level when that's the case so the user sees the human
+    // sentence, not the JSON soup.
+    if (candidate.startsWith('{')) {
+      try {
+        const inner = JSON.parse(candidate) as Record<string, unknown>;
+        const innerErr = inner.error as Record<string, unknown> | undefined;
+        const innerMsg =
+          (innerErr && typeof innerErr.message === 'string' ? innerErr.message : null) ??
+          (typeof inner.message === 'string' ? inner.message : null);
+        if (innerMsg) return innerMsg;
+      } catch {
+        // fall through to returning the raw candidate
+      }
+    }
+    return candidate;
+  }
+  return null;
+}
+
+/**
+ * Pattern-match the EXTRACTED error message and surface a friendly
+ * one-liner. When stdout already carries an actionable upstream error
+ * (codex API 4xx) we just relay it; the heuristics below are fallbacks
+ * for the cases where only stderr is informative.
+ */
+function diagnoseCliError(stderr: string, locale: 'fr' | 'en' | 'es'): string | null {
+  const text = stderr.toLowerCase();
+  // OpenAI explicit "model not found / unsupported" responses
+  if (text.includes('model_not_found') || text.includes('does not have access to model')) {
+    return serverT(locale, 'agent.execHints.modelNotFound');
+  }
+  // Codex / claude API key missing
+  if (
+    text.includes('api key') &&
+    (text.includes('missing') || text.includes('not set') || text.includes('invalid'))
+  ) {
+    return serverT(locale, 'agent.execHints.apiKey');
+  }
+  // codex MCP transport noise — only flag as last-resort diagnostic;
+  // the real cause is usually visible in the stdout error event we
+  // already extracted above. Keep this LOW priority so it doesn't shadow
+  // the upstream message.
+  if (
+    text.includes('rmcp::transport') ||
+    (text.includes('jsonrpcmessage') && text.includes('serde'))
+  ) {
+    return serverT(locale, 'agent.execHints.codexMcpTransport');
+  }
+  return null;
+}
+
 function errorFallbackText(
   stderr: string,
   stdout: string,
@@ -444,10 +535,23 @@ function errorFallbackText(
   locale: 'fr' | 'en' | 'es',
 ): string {
   const parts: string[] = [serverT(locale, 'agent.execFailed', { exitCode })];
+
+  // Surface the upstream API error from the NDJSON stdout BEFORE the
+  // stderr noise. For codex specifically, the 4xx body lives in
+  // `{type:"error" | "turn.failed", message: "..."}` events — those are
+  // the actionable signal; stderr is mostly rmcp plugin handshake noise.
+  const upstream = extractCodexErrorFromStdout(stdout);
+  if (upstream) {
+    parts.push(`⚠ ${upstream}`);
+  } else {
+    const hint = diagnoseCliError(stderr, locale);
+    if (hint) parts.push(hint);
+  }
+
   if (stderr) {
     parts.push(`stderr:\n${sanitizeStderr(stderr)}`);
   }
-  if (stdout) {
+  if (stdout && !upstream) {
     parts.push(`stdout:\n${stdout}`);
   }
   return parts.join('\n\n').trim();

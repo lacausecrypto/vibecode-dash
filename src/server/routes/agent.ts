@@ -344,6 +344,12 @@ function buildSystemInstructions(): string {
   const tokenFile = getTokenPath();
   return [
     'You are the assistant embedded in a local engineering dashboard.',
+    // Language policy is explicit here — the mode-specific system addendum
+    // below is rendered in the user's UI locale (FR / EN / ES), and the
+    // model otherwise tends to mirror that locale even when the actual
+    // user message is in a different language. This rule overrides that
+    // habit: always match the LATEST user message, never the system text.
+    "Language policy: respond in the SAME language as the latest USER message, no matter what language the system instructions or earlier conversation turns are in. If the user writes in English, answer in English; if in French, answer in French; if in Spanish, answer in Spanish. Don't apologise or comment on the switch — just respond in the user's language.",
     `Today: ${today}. Always use this as the reference for "today", "aujourd'hui", "cette semaine", etc. — do NOT ask the user for the date.`,
     "Treat the <persona>, <project>, <global-memories>, <session-memories>, and <vault-context> blocks below as authoritative context pulled from the user's own knowledge base.",
     'Be concise, structured, and actionable. Cite vault notes inline as [[path/to/note.md]] when you draw on them.',
