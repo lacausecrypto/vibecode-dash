@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-04-30
+
+Patch release: three targeted bug fixes — Radar promote was silently
+failing in the UI even when the server write succeeded, the
+project-detail header was squeezing the project name to "m..." on
+tablet, and Obsidian was accumulating false-positive orphans because
+the auto hubs only rebuilt on manual reindex.
+
+### Fixed
+
+- **Radar — "→ Concept" promote button.** Two stacked bugs that made
+  the action look broken from the user's seat:
+  - The InsightCard had `catch { /* swallow */ }` around the promote
+    POST. Any thrown error (vault path unset, write permission denied,
+    insight not in DB) produced no feedback. Replaced with an
+    `onError` prop wired to the parent's existing ErrorBanner, plus a
+    check on `res.ok === false` server responses.
+  - On success the server flipped the insight's status to `explored`,
+    but the client's in-memory list wasn't updated until the next
+    `loadRadar` tick. The user saw the toast briefly, then the insight
+    stayed in the pending list — looking like the action was a no-op.
+    `onPromoted` now also receives the `insightId` so the parent
+    `showPromotedToast` can `setInsights(rows ⇒ rows.filter(...))`.
+- **Project-detail header layout < lg.** On viewports below 1024 px the
+  header card laid out 5 items on a single flex-wrap row (avatar /
+  identity / health gauge / sessions+tokens / Ask agent + Rescan
+  buttons). The right-side strip claimed ~350 px on its own, squeezing
+  the identity zone via flex-1 + min-w-0 — project name truncated to
+  "m...", metadata wrapping word-by-word vertically. Fix: split into
+  two zones (identity / metrics + actions) and stack them on < lg via
+  `flex-col lg:flex-row lg:flex-wrap`. `ml-auto` on the buttons cluster
+  keeps them right-anchored on the second row.
+- **Obsidian — reduce false-positive orphans.** Every promoted insight
+  (`Concepts/radar/<slug>.md`) and archived session
+  (`Sessions/<...>.md`) was flagged as orphan in the Vault page until
+  the user manually clicked "Reindex Obsidian" in Settings. Cause: the
+  `rebuildVaultHubs` step (which writes `Concepts/_index.md`,
+  `Sessions/_index.md`, etc. — the auto hubs that backlink every note
+  in their folder) was only called from the manual reindex endpoint.
+  The scheduled job and the fs watcher both called
+  `reindexObsidianVault` directly. Fix: move the `rebuildVaultHubs`
+  call into `reindexObsidianVault` itself, so the scheduler tick + the
+  watcher debounced reindex + the manual endpoint all refresh the
+  hubs in the same pass. Failure-tolerant: a hub-write error logs a
+  warning and the link scan continues.
+
 ## [0.3.1] — 2026-04-30
 
 Patch release: agent CLI error diagnostics, refreshed model catalogs,
@@ -586,7 +632,8 @@ First public release. End-to-end functional, ~60 API endpoints, single-user / 12
 - No Tauri packaging yet (planned for v1.1).
 - No embeddings layer; vault retrieval is FTS5-only (planned for v1.2).
 
-[Unreleased]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.1.0...v0.2.0

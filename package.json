@@ -1,6 +1,6 @@
 {
   "name": "vibecode-dash",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Local-first dashboard for the vibe-coding era. Aggregates LLM CLI usage (claude, codex), GitHub, and an Obsidian vault into one 127.0.0.1 app — no cloud, no telemetry.",
   "keywords": [
     "vibe-coding",
