@@ -272,9 +272,17 @@ export default function RadarRoute() {
     }
   }
 
-  function showPromotedToast(path: string) {
+  function showPromotedToast(path: string, insightId: string) {
+    // Toast surfaces the vault path the server actually wrote to (which
+    // may differ from the slug we hashed if a same-titled note already
+    // existed — resolveUniquePath appends `-2`, `-3`, etc.).
     setToast(t('radar.toast.noteCreated', { path }));
     setTimeout(() => setToast(null), 3500);
+    // Server flipped status to `explored` after the write; mirror that
+    // locally so the insight disappears from the pending list right
+    // away. Without this the user clicks, sees the toast, then the
+    // insight stays visible and they think the action was no-op.
+    setInsights((rows) => rows.filter((r) => r.id !== insightId));
   }
 
   // Customisable shortcuts — bindings live in localStorage, editable in /settings.
@@ -681,6 +689,7 @@ export default function RadarRoute() {
                       onDismissed={() => void handleInsightStatus(i.id, 'dismissed')}
                       onRestore={() => void handleInsightStatus(i.id, 'pending')}
                       onPromoted={showPromotedToast}
+                      onError={(e) => setError(formatError(e))}
                       t={t}
                     />
                   ))}
@@ -747,6 +756,7 @@ export default function RadarRoute() {
                     onDismissed={() => void handleInsightStatus(i.id, 'dismissed')}
                     onRestore={() => void handleInsightStatus(i.id, 'pending')}
                     onPromoted={showPromotedToast}
+                    onError={(e) => setError(formatError(e))}
                     t={t}
                   />
                 ))}
@@ -1298,6 +1308,7 @@ function InsightCard({
   onDismissed,
   onRestore,
   onPromoted,
+  onError,
   t,
 }: {
   insight: Insight;
@@ -1307,7 +1318,14 @@ function InsightCard({
   onExplored: () => void;
   onDismissed: () => void;
   onRestore: () => void;
-  onPromoted: (path: string) => void;
+  // Receives the vault path of the freshly-created concept note + the
+  // insight id so the parent can both surface a toast AND remove the
+  // insight from the local list (the server flips its status to
+  // `explored`, but the client list is in-memory and would otherwise
+  // keep showing the just-promoted insight as pending until the next
+  // loadRadar tick).
+  onPromoted: (path: string, insightId: string) => void;
+  onError: (e: unknown) => void;
   t: Translator;
 }) {
   const meta = INSIGHT_LABEL[insight.type] || { label: insight.type, tone: 'neutral' as const };
@@ -1320,13 +1338,23 @@ function InsightCard({
   async function handlePromote() {
     setPromoting(true);
     try {
-      const res = await apiPost<{ ok: boolean; path: string }>(
+      const res = await apiPost<{ ok: boolean; path: string; error?: string }>(
         `/api/insights/${insight.id}/promote`,
         {},
       );
-      if (res.ok) onPromoted(res.path);
-    } catch {
-      /* swallow */
+      if (res.ok) {
+        onPromoted(res.path, insight.id);
+      } else {
+        // Server returned 404/500 with { error: 'reason' } shape. Surface
+        // it instead of swallowing — silent failure was the bug report:
+        // user clicks, nothing visible changes, looks like the button
+        // is dead.
+        onError(new Error(res.error || 'promote_failed'));
+      }
+    } catch (e) {
+      // Network / 5xx / cwd_not_allowed / vault path issue — used to be
+      // swallowed silently; now bubbles up to the parent's error banner.
+      onError(e);
     } finally {
       setPromoting(false);
     }
