@@ -1556,7 +1556,7 @@ export default function AgentRoute() {
                     <summary className="inline-flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-2)] text-[15px] leading-none text-[var(--text-mute)] hover:border-[var(--border-strong)] hover:text-[var(--text)]">
                       +
                     </summary>
-                    <div className="absolute right-0 z-10 mt-1 flex w-[220px] max-w-[calc(100vw-2rem)] flex-col gap-2 rounded-[var(--radius)] border border-[var(--border-strong)] bg-[rgba(11,13,17,0.96)] p-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur">
+                    <div className="absolute right-0 z-10 mt-1 flex w-[220px] max-w-[calc(100vw-2rem)] flex-col gap-2 rounded-[var(--radius)] border border-[var(--border-strong)] bg-[#0b0d11] p-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.8)]">
                       <Segmented
                         value={newProvider}
                         options={[
@@ -1722,7 +1722,7 @@ export default function AgentRoute() {
                 >
                   ⋯
                 </summary>
-                <div className="absolute right-0 z-10 mt-1 flex w-[280px] max-w-[calc(100vw-2rem)] flex-col gap-0.5 rounded-[var(--radius)] border border-[var(--border-strong)] bg-[rgba(11,13,17,0.96)] p-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur">
+                <div className="absolute right-0 z-10 mt-1 flex w-[280px] max-w-[calc(100vw-2rem)] flex-col gap-0.5 rounded-[var(--radius)] border border-[var(--border-strong)] bg-[#0b0d11] p-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.8)]">
                   <button
                     type="button"
                     onClick={() => {

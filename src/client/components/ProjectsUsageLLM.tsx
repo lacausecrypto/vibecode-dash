@@ -995,12 +995,14 @@ const UsageRow = memo(function UsageRow({
         aria-controls={`${headerId}-detail`}
         className="w-full px-3 py-2 text-left"
       >
-        {/* Layout strategy: stack column on mobile, row+wrap on sm+.
-            On mobile the left zone (name + chips + path) gets full width
-            so the project name doesn't word-wrap word-by-word, and the
-            KPI strip below switches to a 3-col grid that fits ~360 px
-            viewports without forcing each cell to its rigid min-w. */}
-        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3">
+        {/* Layout strategy: stack column on mobile + tablet, row+wrap on
+            lg+ only. Below 1024 px the KPI strip claims ~440 px on its own
+            (5 cells × ~88 px + gaps), leaving < 200 px for the left zone
+            and forcing the project name to truncate to "d.." with chips
+            wrapping below. The 3-col grid pattern reads cleanly through
+            the whole tablet range; only the desktop has the room for the
+            tighter horizontal layout. */}
+        <div className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-center lg:justify-between">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span
@@ -1018,7 +1020,7 @@ const UsageRow = memo(function UsageRow({
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-dim)]">
               {row.projectPath ? (
-                <span className="truncate max-w-full sm:max-w-[260px]" title={row.projectPath}>
+                <span className="truncate max-w-full lg:max-w-[260px]" title={row.projectPath}>
                   {row.projectPath}
                 </span>
               ) : null}
@@ -1033,19 +1035,18 @@ const UsageRow = memo(function UsageRow({
             </div>
           </div>
 
-          {/* On mobile this is a 3-col grid (Msg/Tokens/Dev row 1, API/Abo row 2)
-              left-aligned. From sm+ it reverts to the original right-aligned
-              flex with the desktop min-widths. The Dev cell's left border is
-              also gated to sm+ since it makes no sense as a cell separator
-              inside the grid layout. */}
-          <div className="grid w-full grid-cols-3 gap-x-3 gap-y-2 text-left text-[12px] text-[var(--text-mute)] sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:justify-end sm:gap-3 sm:text-right">
-            <div className="sm:min-w-[56px]">
+          {/* Mobile + tablet: 3-col grid (Msg/Tokens/Dev row 1, API/Abo
+              row 2) left-aligned, gives each cell ~30% of the viewport.
+              Desktop (lg+): right-aligned horizontal flex with min-widths
+              + the Dev cell's left border separator restored. */}
+          <div className="grid w-full grid-cols-3 gap-x-3 gap-y-2 text-left text-[12px] text-[var(--text-mute)] lg:flex lg:w-auto lg:flex-wrap lg:items-center lg:justify-end lg:gap-3 lg:text-right">
+            <div className="lg:min-w-[56px]">
               <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
                 Msg
               </div>
               <div className="num text-[12px] text-[var(--text)]">{formatCount(row.messages)}</div>
             </div>
-            <div className="sm:min-w-[64px]">
+            <div className="lg:min-w-[64px]">
               <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
                 Tokens
               </div>
@@ -1054,7 +1055,7 @@ const UsageRow = memo(function UsageRow({
               </div>
             </div>
             <div
-              className="sm:min-w-[88px] sm:border-l sm:border-[var(--border)] sm:pl-3"
+              className="lg:min-w-[88px] lg:border-l lg:border-[var(--border)] lg:pl-3"
               title={`${t('projects.detail.costs.devEquiv')}: ${formatEur(devEur, locale)} (${t('projects.detail.costs.devEquivHintRange', { low: formatEur(effort.lowEur, locale), high: formatEur(effort.highEur, locale) })})`}
             >
               <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
@@ -1067,7 +1068,7 @@ const UsageRow = memo(function UsageRow({
                 {formatHours(devHours, locale)}
               </div>
             </div>
-            <div className="sm:min-w-[88px]">
+            <div className="lg:min-w-[88px]">
               <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
                 {t('usage.llmPerProject.rowApiLabel')}
               </div>
@@ -1078,7 +1079,7 @@ const UsageRow = memo(function UsageRow({
                 {t('usage.llmPerProject.apiPaygSub')}
               </div>
             </div>
-            <div className="sm:min-w-[88px]">
+            <div className="lg:min-w-[88px]">
               <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
                 {t('usage.llmPerProject.rowAboLabel')}
               </div>

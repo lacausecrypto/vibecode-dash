@@ -1056,26 +1056,30 @@ const ProjectRow = memo(function ProjectRow({ project }: { project: ProjectSumma
       to={`/projects/${project.id}`}
       className="group block rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2 transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-2)]"
     >
-      {/* Two-zone layout: identity (left) + metrics (right). On mobile
-          we force a column stack — every row gets exactly 2 visual lines
-          regardless of whether git_branch is set, so card heights are
-          uniform across the list. From sm+ we revert to a single-row
-          flex with wrap for the original dense desktop look. */}
-      <div className="flex flex-col gap-1.5 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3 sm:gap-y-1">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 sm:flex-1">
+      {/* Layout strategy: 2-row stack on mobile + tablet (< lg), single-
+          row dense layout on lg+. The 4-zone right strip (LangBar, topLangs,
+          LoC, HealthBadge, dirty Chip, days) needs ~470 px on its own —
+          below lg there's not enough room without truncating the name to
+          "m..." with the type chip wrapping awkwardly underneath. */}
+      <div className="flex flex-col gap-1 lg:flex-row lg:flex-wrap lg:items-center lg:gap-x-3 lg:gap-y-1">
+        {/* Row 1 (mobile/tablet) AND inline left zone (desktop):
+            health-dot + name + type chip + branch + path. The path takes
+            available space and truncates; everything else is shrink-0 so
+            the name keeps its room. */}
+        <div className="flex min-w-0 items-center gap-2 lg:flex-1">
           <span
             aria-hidden="true"
             className="h-1.5 w-1.5 shrink-0 rounded-full"
             style={{ backgroundColor: healthColor(project.health_score) }}
           />
-          <span className="truncate text-[13.5px] font-medium text-[var(--text)] group-hover:text-white">
+          <span className="min-w-0 truncate text-[13.5px] font-medium text-[var(--text)] group-hover:text-white">
             {project.name}
           </span>
           <span className="shrink-0 rounded-full border border-[var(--border)] px-1.5 py-0 text-[9.5px] uppercase tracking-wider text-[var(--text-faint)]">
             {project.type}
           </span>
           {project.git_branch ? (
-            <span className="shrink-0 text-[10.5px] text-[var(--text-faint)]">
+            <span className="hidden shrink-0 text-[10.5px] text-[var(--text-faint)] sm:inline">
               <span aria-hidden="true">⎇</span> {project.git_branch}
             </span>
           ) : null}
@@ -1084,15 +1088,18 @@ const ProjectRow = memo(function ProjectRow({ project }: { project: ProjectSumma
           </span>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2 sm:ml-auto">
+        {/* Row 2 (mobile/tablet) / right strip (desktop): metrics + chips.
+            min-w-0 + flex-wrap on tablet keeps everything visible without
+            forcing a horizontal scroll; lg+ flips to ml-auto + nowrap. */}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 lg:ml-auto lg:flex-nowrap lg:gap-2">
           <LangBar languages={languages} width={96} />
           {topLangs.length > 0 ? (
-            <span className="hidden text-[10px] uppercase tracking-wider text-[var(--text-faint)] sm:inline">
+            <span className="hidden text-[10px] uppercase tracking-wider text-[var(--text-faint)] lg:inline">
               {topLangs.map(langLabel).join(' · ')}
             </span>
           ) : null}
           {project.loc ? (
-            <span className="num hidden w-14 text-right text-[11px] text-[var(--text-dim)] tabular-nums sm:inline">
+            <span className="num hidden w-14 text-right text-[11px] text-[var(--text-dim)] tabular-nums lg:inline">
               {compactLoc(project.loc)}
             </span>
           ) : null}
@@ -1102,7 +1109,7 @@ const ProjectRow = memo(function ProjectRow({ project }: { project: ProjectSumma
               {project.uncommitted} {t('common.dirty')}
             </Chip>
           ) : null}
-          <span className="num ml-auto w-20 shrink-0 text-right text-[11px] text-[var(--text-dim)] tabular-nums sm:ml-0">
+          <span className="num ml-auto w-20 shrink-0 text-right text-[11px] text-[var(--text-dim)] tabular-nums lg:ml-0">
             {fmtDays(days, t)}
           </span>
         </div>

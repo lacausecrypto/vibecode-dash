@@ -319,7 +319,14 @@ kbd {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface-1);
-  overflow: hidden;
+  /* `overflow: visible` so popovers (new-session menu, more-options menu)
+     can escape the pane bounds — `hidden` was clipping their left edge on
+     mobile/tablet. Inner scroll containers (.agent-sessions-scroll,
+     .agent-conversation) own their own `overflow-y: auto`, so removing it
+     here doesn't break the pane scrolling. Rounded-corner bleed is a
+     non-issue: children stack vertically with their own padding and never
+     reach the corner radius. */
+  overflow: visible;
 }
 
 .agent-sessions-scroll {
