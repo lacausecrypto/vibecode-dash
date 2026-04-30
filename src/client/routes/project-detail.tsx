@@ -607,64 +607,80 @@ function HeroBar({
   const color = avatarColor(project.name);
   const initial = project.name[0]?.toUpperCase() || '?';
   return (
-    <div className="flex flex-wrap items-center gap-4 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-1)] px-4 py-3">
-      <div
-        aria-hidden="true"
-        className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[var(--radius)] text-[20px] font-semibold"
-        style={{ backgroundColor: `${color}22`, color }}
-      >
-        {initial}
+    /* Two-zone split that stacks on mobile + tablet (< lg) and reverts to
+       a single row at lg+. Below lg, the right strip (health gauge +
+       sessions/tokens + 2 buttons) consumed ~350 px on its own — leaving
+       the identity zone squeezed and the project name truncated to "m..."
+       with the meta line wrapping word-by-word vertically. */
+    <div className="flex flex-col gap-3 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-1)] px-4 py-3 lg:flex-row lg:flex-wrap lg:items-center lg:gap-4">
+      {/* Identity zone — avatar + name + chips + meta. flex-1 at lg+
+          so it grabs whatever the right strip didn't claim. */}
+      <div className="flex min-w-0 items-center gap-4 lg:flex-1">
+        <div
+          aria-hidden="true"
+          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[var(--radius)] text-[20px] font-semibold"
+          style={{ backgroundColor: `${color}22`, color }}
+        >
+          {initial}
+        </div>
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="truncate text-[18px] font-semibold tracking-tight text-[var(--text)]">
+              {project.name}
+            </h1>
+            <Chip tone="neutral">{project.type}</Chip>
+            {project.git_branch ? (
+              <span className="text-[11px] text-[var(--text-dim)]">
+                <span aria-hidden="true">⎇</span> {project.git_branch}
+              </span>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-[var(--text-dim)]">
+            <span className="truncate font-mono" title={project.path}>
+              {project.path}
+            </span>
+            {gitRemoteShort ? (
+              <span className="truncate text-[var(--text-faint)]" title={project.git_remote || ''}>
+                {gitRemoteShort}
+              </span>
+            ) : null}
+            {project.last_commit_at ? (
+              <span>last commit {relativeTime(project.last_commit_at, t)}</span>
+            ) : null}
+            {topLangs.length > 0 ? (
+              <span className="text-[var(--text-faint)]">
+                {topLangs.map((l) => `.${l}`).join(' ')}
+              </span>
+            ) : null}
+          </div>
+        </div>
       </div>
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <div className="flex flex-wrap items-center gap-2">
-          <h1 className="truncate text-[18px] font-semibold tracking-tight text-[var(--text)]">
-            {project.name}
-          </h1>
-          <Chip tone="neutral">{project.type}</Chip>
-          {project.git_branch ? (
-            <span className="text-[11px] text-[var(--text-dim)]">
-              <span aria-hidden="true">⎇</span> {project.git_branch}
+
+      {/* Metrics + actions strip — flows below identity on mobile/tablet,
+          inline at lg+. flex-wrap so on a 640-1023 px viewport the
+          buttons can fall to a second sub-row if the gauge + sessions
+          + buttons exceed available width. */}
+      <div className="flex flex-wrap items-center gap-3 lg:gap-4">
+        <HealthGauge score={project.health_score} />
+        <div className="flex flex-col gap-0.5 text-right">
+          <span className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+            {hasUsage && usage ? `${numberLabel(usage.sessions, locale)} sessions` : 'no usage'}
+          </span>
+          <span className="num text-[13px] font-medium tabular-nums text-[var(--text)]">
+            {hasUsage && usage ? formatTokens(usage.totalTokens) : '—'} tok
+          </span>
+          {project.loc ? (
+            <span className="text-[10px] text-[var(--text-faint)]">
+              {numberLabel(project.loc, locale)} LoC
             </span>
           ) : null}
         </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-[var(--text-dim)]">
-          <span className="truncate font-mono" title={project.path}>
-            {project.path}
-          </span>
-          {gitRemoteShort ? (
-            <span className="truncate text-[var(--text-faint)]" title={project.git_remote || ''}>
-              {gitRemoteShort}
-            </span>
-          ) : null}
-          {project.last_commit_at ? (
-            <span>last commit {relativeTime(project.last_commit_at, t)}</span>
-          ) : null}
-          {topLangs.length > 0 ? (
-            <span className="text-[var(--text-faint)]">
-              {topLangs.map((l) => `.${l}`).join(' ')}
-            </span>
-          ) : null}
+        <div className="ml-auto flex shrink-0 items-center gap-2 lg:ml-0">
+          <AskAgentButton projectId={project.id} label={t('projects.detail.askAgent')} />
+          <Button tone="ghost" onClick={onRescan}>
+            {t('projects.detail.rescan')}
+          </Button>
         </div>
-      </div>
-      <HealthGauge score={project.health_score} />
-      <div className="hidden flex-col gap-0.5 text-right md:flex">
-        <span className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
-          {hasUsage && usage ? `${numberLabel(usage.sessions, locale)} sessions` : 'no usage'}
-        </span>
-        <span className="num text-[13px] font-medium tabular-nums text-[var(--text)]">
-          {hasUsage && usage ? formatTokens(usage.totalTokens) : '—'} tok
-        </span>
-        {project.loc ? (
-          <span className="text-[10px] text-[var(--text-faint)]">
-            {numberLabel(project.loc, locale)} LoC
-          </span>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <AskAgentButton projectId={project.id} label={t('projects.detail.askAgent')} />
-        <Button tone="ghost" onClick={onRescan}>
-          {t('projects.detail.rescan')}
-        </Button>
       </div>
     </div>
   );
