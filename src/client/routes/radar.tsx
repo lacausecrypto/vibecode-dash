@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
 import { Button, Card, Chip, Empty, ErrorBanner, Section, Segmented, Stat } from '../components/ui';
 import { apiDelete, apiGet, apiPost } from '../lib/api';
 import { useTranslation } from '../lib/i18n';
@@ -426,30 +427,50 @@ export default function RadarRoute() {
               </span>
             }
           >
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <Stat
-                label={t('radar.stats.competitors')}
-                value={competitors.length}
-                hint={t('radar.stats.sourceHint', {
-                  agent: stats.agentCount,
-                  manual: stats.manualCount,
-                })}
-              />
-              <Stat
-                label={t('radar.stats.marketGaps')}
-                value={stats.byType.market_gap}
-                tone={stats.byType.market_gap > 0 ? 'accent' : undefined}
-              />
-              <Stat
-                label={t('radar.stats.overlaps')}
-                value={stats.byType.overlap}
-                tone={stats.byType.overlap > 0 ? 'warn' : undefined}
-              />
-              <Stat
-                label={t('radar.stats.vaultEchoes')}
-                value={stats.byType.vault_echo}
-                tone={stats.byType.vault_echo > 0 ? 'success' : undefined}
-              />
+            {/* Same pattern as the cross-project Overview: 2 context KPIs
+                stacked on the left, insights-mix donut on the right. The
+                previous flat 4-card strip clipped/wrapped long labels in
+                narrow grid cells (cf. "COMPETITOR / S" wrap on tablet). */}
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_2fr]">
+              <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-1">
+                <Stat
+                  label={t('radar.stats.competitors')}
+                  value={competitors.length}
+                  hint={t('radar.stats.sourceHint', {
+                    agent: stats.agentCount,
+                    manual: stats.manualCount,
+                  })}
+                />
+                <Stat
+                  label={t('radar.global.totalInsights')}
+                  value={stats.byType.market_gap + stats.byType.overlap + stats.byType.vault_echo}
+                />
+              </div>
+              <Card>
+                <RadarInsightsDonut
+                  t={t}
+                  slices={[
+                    {
+                      key: 'marketGap',
+                      label: t('radar.stats.marketGaps'),
+                      value: stats.byType.market_gap,
+                      color: '#0a84ff',
+                    },
+                    {
+                      key: 'overlap',
+                      label: t('radar.stats.overlaps'),
+                      value: stats.byType.overlap,
+                      color: '#ffd60a',
+                    },
+                    {
+                      key: 'vaultEcho',
+                      label: t('radar.stats.vaultEchoes'),
+                      value: stats.byType.vault_echo,
+                      color: '#30d158',
+                    },
+                  ]}
+                />
+              </Card>
             </div>
           </Section>
 
@@ -777,33 +798,67 @@ function GlobalSummary({
 
   return (
     <>
-      {/* Stats Section — wraps the KPI grid in a proper titled Section
-          (was orphan markup before). Same 6-stat layout but framed
-          consistently with the rest of the dashboard. */}
+      {/* Stats Section — context KPIs on the left, insights breakdown
+          donut on the right. Donut + center total + side legend tells the
+          insight-mix story at a glance; the previous flat 6-stat strip
+          buried the breakdown under uniform cards (and clipped labels in
+          narrow cells). */}
       <Section title={t('radar.global.statsTitle')} meta={t('radar.global.statsMeta')}>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
-          <Stat label={t('radar.stats.activeProjects')} value={totals.projects} />
-          <Stat label={t('radar.stats.competitors')} value={totals.competitors} />
-          <Stat
-            label={t('radar.stats.pending')}
-            value={totals.pending}
-            tone={totals.pending > 0 ? 'accent' : undefined}
-          />
-          <Stat
-            label={t('radar.stats.marketGaps')}
-            value={totals.market_gap}
-            tone={totals.market_gap > 0 ? 'accent' : undefined}
-          />
-          <Stat
-            label={t('radar.stats.overlaps')}
-            value={totals.overlap}
-            tone={totals.overlap > 0 ? 'warn' : undefined}
-          />
-          <Stat
-            label={t('radar.stats.vaultEchoes')}
-            value={totals.vault_echo}
-            tone={totals.vault_echo > 0 ? 'success' : undefined}
-          />
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_2fr]">
+          {/* 3 cards always fill the row evenly: 3-up on mobile/tablet
+              (no awkward orphan in a 2-col grid), then stacked vertically
+              when the parent splits into [stats | donut] at lg. */}
+          <div className="grid grid-cols-3 gap-2 sm:gap-3 lg:grid-cols-1">
+            <Stat label={t('radar.stats.activeProjects')} value={totals.projects} />
+            <Stat label={t('radar.stats.competitors')} value={totals.competitors} />
+            <Stat
+              label={t('radar.global.totalInsights')}
+              value={
+                totals.pending +
+                totals.explored +
+                totals.market_gap +
+                totals.overlap +
+                totals.vault_echo
+              }
+            />
+          </div>
+          <Card>
+            <RadarInsightsDonut
+              t={t}
+              slices={[
+                {
+                  key: 'pending',
+                  label: t('radar.stats.pending'),
+                  value: totals.pending,
+                  color: '#64d2ff',
+                },
+                {
+                  key: 'marketGap',
+                  label: t('radar.stats.marketGaps'),
+                  value: totals.market_gap,
+                  color: '#0a84ff',
+                },
+                {
+                  key: 'overlap',
+                  label: t('radar.stats.overlaps'),
+                  value: totals.overlap,
+                  color: '#ffd60a',
+                },
+                {
+                  key: 'vaultEcho',
+                  label: t('radar.stats.vaultEchoes'),
+                  value: totals.vault_echo,
+                  color: '#30d158',
+                },
+                {
+                  key: 'explored',
+                  label: t('radar.global.exploredLabel'),
+                  value: totals.explored,
+                  color: '#8e8e93',
+                },
+              ]}
+            />
+          </Card>
         </div>
       </Section>
 
@@ -925,6 +980,130 @@ function GlobalSummary({
         </div>
       </Section>
     </>
+  );
+}
+
+type DonutSlice = { key: string; label: string; value: number; color: string };
+
+/**
+ * Donut chart showing the mix of insight types. Each slice colour-coded
+ * by tone; center label = total; side legend lists each category with
+ * absolute count + share %. Caller passes the slice list so per-project
+ * (3 types) and global (5 types) views share the same component without
+ * dragging irrelevant zero-rows into each other's legend.
+ *
+ * Empty state: when every count is zero we render a neutral placeholder
+ * ring + helper copy instead of an unreadable Pie with no data — Recharts
+ * draws a single 0%-slice that looks broken otherwise.
+ */
+function RadarInsightsDonut({
+  slices,
+  t,
+}: {
+  slices: DonutSlice[];
+  t: Translator;
+}) {
+  const total = slices.reduce((acc, s) => acc + s.value, 0);
+
+  if (total === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 py-6 text-center text-[12px] text-[var(--text-dim)]">
+        <div
+          aria-hidden="true"
+          className="h-24 w-24 rounded-full border-[10px] border-[var(--border)]"
+        />
+        <span>{t('radar.global.donutEmpty')}</span>
+      </div>
+    );
+  }
+
+  // Recharts ignores zero-value slices but emits warnings — strip them.
+  const data = slices.filter((s) => s.value > 0);
+
+  return (
+    <div className="flex flex-row items-center gap-3 sm:items-stretch">
+      {/* Compact donut on mobile (28×28 ≈ 112 px), grows on sm+. The
+          legend sits to its right at every viewport — earlier full-width
+          stack on mobile pushed the chart to take half the screen. */}
+      <div className="relative h-28 w-28 shrink-0 sm:h-44 sm:w-44">
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie
+              data={data}
+              dataKey="value"
+              nameKey="label"
+              innerRadius="62%"
+              outerRadius="92%"
+              paddingAngle={1.5}
+              stroke="rgba(11,13,17,0.85)"
+              strokeWidth={1.5}
+              isAnimationActive={false}
+            >
+              {data.map((d) => (
+                <Cell key={d.key} fill={d.color} />
+              ))}
+            </Pie>
+            <Tooltip
+              cursor={false}
+              wrapperStyle={{ outline: 'none' }}
+              contentStyle={{
+                backgroundColor: '#0b0d11',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 10,
+                color: '#f5f5f7',
+                fontSize: 12,
+                padding: '6px 10px',
+              }}
+              formatter={(value, _name, item) => {
+                const n = Number(value ?? 0);
+                const share = total > 0 ? Math.round((n / total) * 100) : 0;
+                const label = String(
+                  (item as { payload?: { label?: string } } | undefined)?.payload?.label ?? '—',
+                );
+                return [`${n} · ${share}%`, label];
+              }}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+          <span className="num text-[18px] font-semibold leading-none text-[var(--text)] sm:text-[26px]">
+            {total}
+          </span>
+          <span className="mt-0.5 text-[9px] uppercase tracking-[0.08em] text-[var(--text-dim)] sm:mt-1 sm:text-[10.5px]">
+            {t('radar.global.donutCenter')}
+          </span>
+        </div>
+      </div>
+
+      {/* Legend with counts + shares. min-w-0 + truncate handles long
+          labels on narrow screens; zero-count rows dimmed so the legend
+          matches what the donut actually draws. */}
+      <ul className="grid min-w-0 flex-1 grid-cols-1 gap-0.5 text-[11.5px] sm:gap-1 sm:text-[12px] lg:grid-cols-1">
+        {slices.map((s) => {
+          const share = total > 0 ? Math.round((s.value / total) * 100) : 0;
+          const dim = s.value === 0;
+          return (
+            <li
+              key={s.key}
+              className={`flex items-center justify-between gap-2 rounded-[var(--radius-sm)] px-1.5 py-0.5 sm:px-2 sm:py-1 ${dim ? 'opacity-50' : ''}`}
+            >
+              <span className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+                <span
+                  aria-hidden="true"
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: s.color }}
+                />
+                <span className="truncate text-[var(--text-dim)]">{s.label}</span>
+              </span>
+              <span className="flex shrink-0 items-baseline gap-1.5">
+                <span className="num font-medium text-[var(--text)]">{s.value}</span>
+                <span className="text-[10.5px] text-[var(--text-faint)]">{share}%</span>
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 
