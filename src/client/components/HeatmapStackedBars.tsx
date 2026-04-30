@@ -67,6 +67,9 @@ type HeatmapStackedBarsProps = {
 
 function formatBucketLong(dateIso: string, groupBy: GroupBy, dtLocale: string): string {
   const d = new Date(`${dateIso}T00:00:00Z`);
+  if (groupBy === 'year') {
+    return String(d.getUTCFullYear());
+  }
   if (groupBy === 'month') {
     return d.toLocaleDateString(dtLocale, { month: 'long', year: 'numeric' });
   }
@@ -90,6 +93,9 @@ function formatBucketLong(dateIso: string, groupBy: GroupBy, dtLocale: string): 
 }
 
 function shortTickFormatter(dateIso: string, groupBy: GroupBy, dtLocale: string): string {
+  if (groupBy === 'year') {
+    return dateIso.slice(0, 4);
+  }
   if (groupBy === 'month') {
     return new Date(`${dateIso}T00:00:00Z`)
       .toLocaleString(dtLocale, { month: 'short' })
@@ -255,14 +261,18 @@ export function HeatmapStackedBars({
               tickLine={false}
               tickFormatter={(v: string) => shortTickFormatter(v, groupBy, dtLocale)}
               // Tick density per granularity:
-              //   month (~12) / quarter (4)    → render every tick (interval 0).
-              //   week (~52)  / biweekly (~26) → DD/MM labels are wider than
-              //     a slot at typical container widths, so we let Recharts
-              //     auto-thin via `preserveStartEnd` + a `minTickGap` floor.
-              //     Without this every tick collided (cf. screenshot bug).
-              //   day (~365)  → way too dense to label all; preserveEnd +
+              //   month (~12) / quarter (4) / year (1) → render every tick.
+              //   week (~52)  / biweekly (~26)         → DD/MM labels are
+              //     wider than a slot at typical container widths, so let
+              //     Recharts auto-thin via `preserveStartEnd` + a
+              //     `minTickGap` floor (otherwise every tick collides).
+              //   day (~365) → way too dense to label all; preserveEnd +
               //     a smaller gap keeps a thin sampling readable.
-              interval={groupBy === 'month' || groupBy === 'quarter' ? 0 : 'preserveStartEnd'}
+              interval={
+                groupBy === 'month' || groupBy === 'quarter' || groupBy === 'year'
+                  ? 0
+                  : 'preserveStartEnd'
+              }
               minTickGap={
                 groupBy === 'day' ? 8 : groupBy === 'week' ? 28 : groupBy === 'biweekly' ? 20 : 0
               }

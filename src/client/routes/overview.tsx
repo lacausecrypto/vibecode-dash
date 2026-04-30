@@ -11,8 +11,10 @@ import {
   YAxis,
 } from 'recharts';
 import { Heatmap } from '../components/Heatmap';
+import { HeatmapStackedBars } from '../components/HeatmapStackedBars';
 import { Card, ErrorBanner, Section, Segmented, Stat } from '../components/ui';
 import { apiGet } from '../lib/api';
+import type { GroupBy, StackedDailyRow } from '../lib/cumulStacks';
 import { type Locale, dateLocale, numberLocale, useTranslation } from '../lib/i18n';
 
 type Project = {
@@ -32,10 +34,18 @@ type HeatmapMetric =
   | 'contrib'
   | 'views'
   | 'clones'
+  | 'npm'
   | 'llm-total'
   | 'llm-claude'
   | 'llm-codex'
   | 'notes';
+
+type NpmDailyByRepoRow = { date: string; repo: string; downloads: number };
+type NpmDailyByRepoResponse = { rows: NpmDailyByRepoRow[] };
+
+// Granularities exposed on the cumul view. 'all' collapses everything into
+// a single column (one bar = total cumulative on the displayed window).
+type CumulBucket = 'day' | 'week' | 'biweekly' | 'month' | 'all';
 
 type TrafficTimeseriesRow = {
   repo: string;
@@ -104,6 +114,8 @@ type CombinedDay = {
   clones: number;
   viewsUniques: number;
   clonesUniques: number;
+  // NPM downloads aggregated across all packages on this date.
+  npm: number;
   // Raw totals including cache (kept for cache-ROI-style comparisons).
   claudeTokens: number;
   codexTokens: number;
@@ -139,26 +151,78 @@ type CombinedDay = {
   codexResponseTokens: number;
 };
 
-type VsModeKey =
-  | 'cld-cdx-tokens'
-  | 'cld-cdx-cost'
-  | 'cld-cdx-sub-leverage'
-  | 'active-cached'
-  | 'payg-abo'
-  | 'views-clones'
-  | 'views-uniques'
-  | 'commits-tokens'
-  | 'input-output'
-  | 'cache-read-create'
-  | 'cld-cdx-cache'
-  | 'codex-reason-output'
-  | 'tokens-views'
-  | 'clones-uniques'
-  | 'commits-cost'
-  | 'commits-output'
-  | 'commits-notes'
-  | 'cost-tokens'
-  | 'cost-output';
+// ─────────────────────────────────────────────────────────────────────────
+// Modular VS comparator
+//
+// The comparator lets the user pick ANY two metrics from the dataset and
+// plot them normalised over 14 days. Replaces the previous fixed-pair
+// design (5 categories × ~4 hardcoded combinations) with a free-form
+// picker. Single source of truth: METRICS — keyed by `MetricKey`, each
+// entry carries the i18n label key, semantic category, default colour,
+// unit (drives sharedScale + leverage formula), and the per-day getter.
+// ─────────────────────────────────────────────────────────────────────────
+
+type MetricUnit =
+  | 'tokens' // any token count, whatever the provider
+  | 'usd' // USD pay-as-you-go or sub-equivalent
+  | 'commits' // GitHub contribution count
+  | 'views' // GitHub traffic views
+  | 'clones' // GitHub traffic clones
+  | 'downloads' // npm package downloads
+  | 'notes'; // vault notes touched
+
+type MetricCategory = 'llm' | 'cache' | 'cost' | 'github' | 'npm' | 'vault';
+
+// Keys are camelCase (no dots) because the i18n lookup splits on `.` to
+// traverse nested objects — dotted keys would never resolve.
+type MetricKey =
+  // LLM volumes (cache excluded unless noted)
+  | 'tokensTotal'
+  | 'tokensActive'
+  | 'tokensInput'
+  | 'tokensOutput'
+  | 'tokensClaudeTotal'
+  | 'tokensClaudeFresh'
+  | 'tokensClaudeOutput'
+  | 'tokensCodexTotal'
+  | 'tokensCodexFresh'
+  | 'tokensCodexOutput'
+  | 'tokensCodexReasoning'
+  | 'tokensCodexResponse'
+  // Cache
+  | 'cacheTotal'
+  | 'cacheRead'
+  | 'cacheCreate'
+  | 'cacheClaude'
+  | 'cacheCodex'
+  // Cost
+  | 'costPaygTotal'
+  | 'costPaygClaude'
+  | 'costPaygCodex'
+  | 'costSubDaily'
+  | 'costSubClaude'
+  | 'costSubCodex'
+  // GitHub
+  | 'ghCommits'
+  | 'ghViews'
+  | 'ghViewsUniques'
+  | 'ghClones'
+  | 'ghClonesUniques'
+  // NPM
+  | 'npmDownloads'
+  // Vault
+  | 'vaultNotes';
+
+type Metric = {
+  key: MetricKey;
+  category: MetricCategory;
+  unit: MetricUnit;
+  // Default colour when the metric is rendered as series A. Series B reuses
+  // a contrasting palette tone — picked at the call site to ensure A ≠ B
+  // visually even when the user picks two metrics from the same family.
+  color: string;
+  getter: (day: CombinedDay, ctx: VsModeCtx) => number;
+};
 
 type VsModeCtx = {
   subDailyUsd: number;
@@ -166,23 +230,265 @@ type VsModeCtx = {
   subCodexUsd: number;
 };
 
-type VsModeConfig = {
-  segLabel?: string;
-  title?: string;
-  legendA?: string;
-  legendB?: string;
-  colorA: string;
-  colorB: string;
-  getA: (day: CombinedDay) => number;
-  getB: (day: CombinedDay, ctx: VsModeCtx) => number;
-  formatValue: (value: number) => string;
-  leverageLabel?: string;
-  leverageValue: (totalA: number, totalB: number, ctx?: VsModeCtx) => string;
-  insight?: string;
-  // Si true: les deux séries partagent la même échelle (100% = max des deux).
-  // À activer uniquement quand A et B ont la même unité.
-  sharedScale?: boolean;
+// Time windows the comparator can plot. Plain-number strings parse straight
+// to `Number(value)` for the day count; 'all' means "everything we have"
+// (capped server-side at 365 d in the daily-combined fetch).
+type VsWindow = '1' | '7' | '14' | '30' | '60' | '90' | '150' | '365' | 'all';
+const VS_WINDOWS: VsWindow[] = ['1', '7', '14', '30', '60', '90', '150', '365', 'all'];
+
+// Single source of truth for all comparable metrics. Keep this list in
+// sync with `MetricKey`. Order roughly mirrors the menu grouping: LLM →
+// cache → cost → github → npm → vault.
+const METRICS: Record<MetricKey, Metric> = {
+  // LLM volumes
+  tokensTotal: {
+    key: 'tokensTotal',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#64d2ff',
+    getter: (d) => d.tokens,
+  },
+  tokensActive: {
+    key: 'tokensActive',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#30d158',
+    getter: (d) => d.activeTokens,
+  },
+  tokensInput: {
+    key: 'tokensInput',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#5e5ce6',
+    getter: (d) => d.inputTokens,
+  },
+  tokensOutput: {
+    key: 'tokensOutput',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#ff9500',
+    getter: (d) => d.outputTokens,
+  },
+  tokensClaudeTotal: {
+    key: 'tokensClaudeTotal',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#64d2ff',
+    getter: (d) => d.claudeTokens,
+  },
+  tokensClaudeFresh: {
+    key: 'tokensClaudeFresh',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#0a84ff',
+    getter: (d) => d.claudeFreshTokens,
+  },
+  tokensClaudeOutput: {
+    key: 'tokensClaudeOutput',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#5ac8fa',
+    getter: (d) => d.claudeOutputTokens,
+  },
+  tokensCodexTotal: {
+    key: 'tokensCodexTotal',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#ff9500',
+    getter: (d) => d.codexTokens,
+  },
+  tokensCodexFresh: {
+    key: 'tokensCodexFresh',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#ffd60a',
+    getter: (d) => d.codexFreshTokens,
+  },
+  tokensCodexOutput: {
+    key: 'tokensCodexOutput',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#ff9f0a',
+    getter: (d) => d.codexOutputTokens,
+  },
+  tokensCodexReasoning: {
+    key: 'tokensCodexReasoning',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#bf5af2',
+    getter: (d) => d.codexReasoningTokens,
+  },
+  tokensCodexResponse: {
+    key: 'tokensCodexResponse',
+    category: 'llm',
+    unit: 'tokens',
+    color: '#ff9500',
+    getter: (d) => d.codexResponseTokens,
+  },
+  // Cache
+  cacheTotal: {
+    key: 'cacheTotal',
+    category: 'cache',
+    unit: 'tokens',
+    color: '#64d2ff',
+    getter: (d) => d.cachedTokens,
+  },
+  cacheRead: {
+    key: 'cacheRead',
+    category: 'cache',
+    unit: 'tokens',
+    color: '#30d158',
+    getter: (d) => d.cacheReadTokens,
+  },
+  cacheCreate: {
+    key: 'cacheCreate',
+    category: 'cache',
+    unit: 'tokens',
+    color: '#ff453a',
+    getter: (d) => d.cacheCreateTokens,
+  },
+  cacheClaude: {
+    key: 'cacheClaude',
+    category: 'cache',
+    unit: 'tokens',
+    color: '#64d2ff',
+    getter: (d) => d.claudeCacheTotalTokens,
+  },
+  cacheCodex: {
+    key: 'cacheCodex',
+    category: 'cache',
+    unit: 'tokens',
+    color: '#ff9500',
+    getter: (d) => d.codexCacheTotalTokens,
+  },
+  // Cost
+  costPaygTotal: {
+    key: 'costPaygTotal',
+    category: 'cost',
+    unit: 'usd',
+    color: '#ffd60a',
+    getter: (d) => d.cost,
+  },
+  costPaygClaude: {
+    key: 'costPaygClaude',
+    category: 'cost',
+    unit: 'usd',
+    color: '#64d2ff',
+    getter: (d) => d.claudeCost,
+  },
+  costPaygCodex: {
+    key: 'costPaygCodex',
+    category: 'cost',
+    unit: 'usd',
+    color: '#ff9500',
+    getter: (d) => d.codexCost,
+  },
+  costSubDaily: {
+    key: 'costSubDaily',
+    category: 'cost',
+    unit: 'usd',
+    color: '#30d158',
+    getter: (_d, ctx) => ctx.subDailyUsd,
+  },
+  costSubClaude: {
+    key: 'costSubClaude',
+    category: 'cost',
+    unit: 'usd',
+    color: '#0a84ff',
+    getter: (d) => d.claudeSubCost,
+  },
+  costSubCodex: {
+    key: 'costSubCodex',
+    category: 'cost',
+    unit: 'usd',
+    color: '#ff9f0a',
+    getter: (d) => d.codexSubCost,
+  },
+  // GitHub
+  ghCommits: {
+    key: 'ghCommits',
+    category: 'github',
+    unit: 'commits',
+    color: '#30d158',
+    getter: (d) => d.github,
+  },
+  ghViews: {
+    key: 'ghViews',
+    category: 'github',
+    unit: 'views',
+    color: '#0a84ff',
+    getter: (d) => d.views,
+  },
+  ghViewsUniques: {
+    key: 'ghViewsUniques',
+    category: 'github',
+    unit: 'views',
+    color: '#bf5af2',
+    getter: (d) => d.viewsUniques,
+  },
+  ghClones: {
+    key: 'ghClones',
+    category: 'github',
+    unit: 'clones',
+    color: '#ff9500',
+    getter: (d) => d.clones,
+  },
+  ghClonesUniques: {
+    key: 'ghClonesUniques',
+    category: 'github',
+    unit: 'clones',
+    color: '#ffd60a',
+    getter: (d) => d.clonesUniques,
+  },
+  // NPM
+  npmDownloads: {
+    key: 'npmDownloads',
+    category: 'npm',
+    unit: 'downloads',
+    color: '#ff2d95',
+    getter: (d) => d.npm,
+  },
+  // Vault
+  vaultNotes: {
+    key: 'vaultNotes',
+    category: 'vault',
+    unit: 'notes',
+    color: '#bf5af2',
+    getter: (d) => d.notes,
+  },
 };
+
+const METRIC_CATEGORIES: MetricCategory[] = ['llm', 'cache', 'cost', 'github', 'npm', 'vault'];
+
+// Format a metric VALUE according to its unit. Used by header KPIs and
+// the chart tooltip. Compact for token volumes (often 5-7 digits), dollar
+// for cost, plain integer for counts.
+function formatMetricValue(value: number, unit: MetricUnit): string {
+  if (unit === 'usd') return value > 999 ? compactNumberLabel(value) : usdLabel(value);
+  if (unit === 'tokens') return compactNumberLabel(Math.round(value));
+  return numberLabel(Math.round(value));
+}
+
+// Leverage / rate / ratio between two metrics' totals. Same unit → "×N.N"
+// pure ratio; different units → rate with both units in the label so the
+// reader can interpret the number.
+function formatLeverage(
+  totalA: number,
+  totalB: number,
+  unitA: MetricUnit,
+  unitB: MetricUnit,
+): string {
+  if (totalB <= 0) return '—';
+  const r = totalA / totalB;
+  if (unitA === unitB) return `×${r.toFixed(2)}`;
+  // Special-case the common money-per-tokens ratio: per-Mtoken reads better
+  // than per-token (raw value < 0.001 otherwise).
+  if (unitA === 'usd' && unitB === 'tokens') return `${usdLabel(r * 1_000_000)} / Mtok`;
+  if (unitA === 'tokens' && unitB === 'usd') return `${compactNumberLabel(r)} tok / $`;
+  // Generic: unit A per unit B with 2 sig figs (rounds 0.42 to "0.42").
+  const formatted = Math.abs(r) >= 100 ? compactNumberLabel(r) : r.toFixed(2);
+  return `${formatted}`;
+}
 
 function yyyymmddFromDate(date: Date): string {
   const y = date.getUTCFullYear();
@@ -255,6 +561,7 @@ const HEATMAP_METRIC_CONFIG: Record<HeatmapMetric, HeatmapMetricConfig> = {
   contrib: { label: 'Contribs GitHub', palette: 'github', unit: 'contribs' },
   views: { label: 'Views', palette: 'cyan', unit: 'views' },
   clones: { label: 'Clones', palette: 'amber', unit: 'clones' },
+  npm: { label: 'NPM', palette: 'amber', unit: 'downloads' },
   'llm-total': { label: 'LLM total', palette: 'github', unit: 'tokens' },
   'llm-claude': { label: 'LLM Claude', palette: 'cyan', unit: 'tokens' },
   'llm-codex': { label: 'LLM Codex', palette: 'amber', unit: 'tokens' },
@@ -272,6 +579,14 @@ function metricLabelKey(metric: HeatmapMetric): string {
     default:
       return metric;
   }
+}
+
+// Metrics that have a per-repo (project) breakdown: their cumul view
+// stacks proportionally per project. Other metrics (contrib aggregates
+// across the user's GH activity, llm-* / notes don't carry a repo field)
+// degrade to a single-color cumul stack.
+function hasPerRepoBreakdown(metric: HeatmapMetric): boolean {
+  return metric === 'views' || metric === 'clones' || metric === 'npm';
 }
 
 function buildAnnualDates(year: number): string[] {
@@ -382,203 +697,6 @@ function percentLabel(ratio: number): string {
   return `${pct >= 0 ? '+' : ''}${pct}%`;
 }
 
-const VS_MODES: Record<VsModeKey, VsModeConfig> = {
-  'cld-cdx-tokens': {
-    colorA: '#64d2ff',
-    colorB: '#ff9500',
-    // Fresh tokens (input + output, no cache) — apples-to-apples. Previously
-    // used cache-inclusive totals, which made Claude 500× bigger than Codex
-    // on days with heavy cache_read and hid Codex's actual work.
-    getA: (day) => day.claudeFreshTokens,
-    getB: (day) => day.codexFreshTokens,
-    formatValue: compactNumberLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
-    sharedScale: true,
-  },
-  'cld-cdx-cost': {
-    colorA: '#64d2ff',
-    colorB: '#ff9500',
-    getA: (day) => day.claudeCost,
-    getB: (day) => day.codexCost,
-    formatValue: usdLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
-    sharedScale: true,
-  },
-  'active-cached': {
-    colorA: '#30d158',
-    colorB: '#64d2ff',
-    getA: (day) => day.activeTokens,
-    getB: (day) => day.cachedTokens,
-    formatValue: compactNumberLabel,
-    leverageValue: (a, b) => {
-      const total = a + b;
-      return total > 0 ? percentLabel(b / total) : '—';
-    },
-    sharedScale: true,
-  },
-  'payg-abo': {
-    colorA: '#ffd60a',
-    colorB: '#30d158',
-    getA: (day) => day.cost,
-    getB: (_day, ctx) => ctx.subDailyUsd,
-    formatValue: usdLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
-    sharedScale: true,
-  },
-  'views-clones': {
-    colorA: '#0a84ff',
-    colorB: '#ff9500',
-    getA: (day) => day.views,
-    getB: (day) => day.clones,
-    formatValue: numberLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
-  },
-  'views-uniques': {
-    colorA: '#0a84ff',
-    colorB: '#bf5af2',
-    getA: (day) => day.views,
-    getB: (day) => day.viewsUniques,
-    formatValue: numberLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
-    sharedScale: true,
-  },
-  'commits-tokens': {
-    colorA: '#30d158',
-    colorB: '#64d2ff',
-    getA: (day) => day.github,
-    getB: (day) => day.tokens,
-    formatValue: numberLabel,
-    leverageValue: (a, b) => (a > 0 ? compactNumberLabel(b / a) : '—'),
-  },
-  'input-output': {
-    colorA: '#5e5ce6',
-    colorB: '#ff9500',
-    getA: (day) => day.inputTokens,
-    getB: (day) => day.outputTokens,
-    formatValue: compactNumberLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
-    sharedScale: true,
-  },
-  'cache-read-create': {
-    colorA: '#30d158',
-    colorB: '#ff453a',
-    getA: (day) => day.cacheReadTokens,
-    getB: (day) => day.cacheCreateTokens,
-    formatValue: compactNumberLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
-    sharedScale: true,
-  },
-  'codex-reason-output': {
-    colorA: '#bf5af2',
-    colorB: '#ff9500',
-    getA: (day) => day.codexReasoningTokens,
-    getB: (day) => day.codexResponseTokens,
-    formatValue: compactNumberLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
-    sharedScale: true,
-  },
-  'tokens-views': {
-    colorA: '#64d2ff',
-    colorB: '#0a84ff',
-    getA: (day) => day.tokens,
-    getB: (day) => day.views,
-    formatValue: compactNumberLabel,
-    leverageValue: (a, b) => (b > 0 ? compactNumberLabel(a / b) : '—'),
-  },
-  'clones-uniques': {
-    colorA: '#ff9500',
-    colorB: '#bf5af2',
-    getA: (day) => day.clones,
-    getB: (day) => day.clonesUniques,
-    formatValue: numberLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
-    sharedScale: true,
-  },
-  'cld-cdx-cache': {
-    colorA: '#64d2ff',
-    colorB: '#ff9500',
-    // Cache volume per CLI — reveals who leans harder on the prompt cache.
-    // Claude = cache_create + cache_read (both billed categories on Anthropic
-    // side). Codex = cached_input (OpenAI only has the read-side concept,
-    // cache creation is implicit).
-    getA: (day) => day.claudeCacheTotalTokens,
-    getB: (day) => day.codexCacheTotalTokens,
-    formatValue: compactNumberLabel,
-    leverageValue: (a, b) => ratioLabel(a, b),
-    sharedScale: true,
-  },
-  'commits-cost': {
-    colorA: '#30d158',
-    colorB: '#ffd60a',
-    getA: (day) => day.github,
-    getB: (day) => day.cost,
-    formatValue: (value) =>
-      value > 999 ? compactNumberLabel(value) : numberLabel(Math.round(value)),
-    leverageValue: (a, b) => (a > 0 ? usdLabel(b / a) : '—'),
-  },
-  'commits-output': {
-    colorA: '#30d158',
-    colorB: '#ff9500',
-    getA: (day) => day.github,
-    getB: (day) => day.outputTokens,
-    formatValue: compactNumberLabel,
-    leverageValue: (a, b) => (a > 0 ? compactNumberLabel(b / a) : '—'),
-  },
-  'commits-notes': {
-    colorA: '#30d158',
-    colorB: '#bf5af2',
-    // Execution (versioned code) vs reflection (vault notes). Reveals which
-    // days you shipped vs which days you planned / designed. Notes come from
-    // the Obsidian vault activity feed, already populated in CombinedDay.
-    getA: (day) => day.github,
-    getB: (day) => day.notes,
-    formatValue: numberLabel,
-    leverageValue: (a, b) => (a > 0 ? ratioLabel(b, a) : '—'),
-  },
-  'cld-cdx-sub-leverage': {
-    colorA: '#64d2ff',
-    colorB: '#ff9500',
-    // Per-vendor subscription ROI: daily PAYG cost that the sub "covers".
-    // We plot PAYG raw per-day per vendor (directly visible on chart), and
-    // expose the sub-leverage ratio (ΣPAYG / Σsub) via leverageValue so the
-    // user sees which CLI's sub is more profitable. Normalizing the two
-    // vendors against the sharedMax lets you compare magnitudes day-over-day.
-    getA: (day) => day.claudeCost,
-    getB: (day) => day.codexCost,
-    formatValue: usdLabel,
-    // Ratio of totals is computed elsewhere via sums of aRaw/bRaw — but the
-    // real insight here is (PAYG Claude / sub Claude) vs (PAYG Codex / sub
-    // Codex). We fold that into the label: leverageValue receives the two
-    // PAYG totals, then we re-derive sub totals from the same row set via
-    // the ctx hook below.
-    leverageValue: (a, b, ctx) => {
-      const subClaude = ctx?.subClaudeUsd ?? 0;
-      const subCodex = ctx?.subCodexUsd ?? 0;
-      const levA = subClaude > 0 ? a / subClaude : 0;
-      const levB = subCodex > 0 ? b / subCodex : 0;
-      if (levA <= 0 && levB <= 0) return '—';
-      return `${levA.toFixed(1)}× · ${levB.toFixed(1)}×`;
-    },
-    sharedScale: true,
-  },
-  'cost-tokens': {
-    colorA: '#ffd60a',
-    colorB: '#64d2ff',
-    getA: (day) => day.cost,
-    getB: (day) => day.tokens,
-    formatValue: (value) => (value > 999 ? compactNumberLabel(value) : usdLabel(value)),
-    leverageValue: (a, b) => (b > 0 ? usdLabel((a / b) * 1_000_000) : '—'),
-  },
-  'cost-output': {
-    colorA: '#ffd60a',
-    colorB: '#ff9500',
-    getA: (day) => day.cost,
-    getB: (day) => day.outputTokens,
-    formatValue: (value) => (value > 999 ? compactNumberLabel(value) : usdLabel(value)),
-    leverageValue: (a, b) => (b > 0 ? usdLabel((a / b) * 1_000_000) : '—'),
-  },
-};
-
 function computeSubscriptionDailyUsd(settings: SettingsResponse | null): number {
   if (!settings) {
     return 0;
@@ -605,49 +723,6 @@ function computeSubscriptionDailyPerVendor(settings: SettingsResponse | null): {
   };
 }
 
-type VsCategoryKey = 'llm' | 'cache' | 'cost' | 'trafic' | 'effort';
-
-type VsCategory = {
-  key: VsCategoryKey;
-  modes: VsModeKey[];
-};
-
-const VS_CATEGORIES: VsCategory[] = [
-  {
-    key: 'llm',
-    modes: ['cld-cdx-tokens', 'cld-cdx-cost', 'cld-cdx-sub-leverage', 'input-output'],
-  },
-  {
-    key: 'cache',
-    modes: ['active-cached', 'cache-read-create', 'cld-cdx-cache', 'codex-reason-output'],
-  },
-  {
-    key: 'cost',
-    modes: ['payg-abo', 'cost-tokens', 'cost-output'],
-  },
-  {
-    key: 'trafic',
-    modes: ['views-clones', 'views-uniques', 'clones-uniques', 'tokens-views'],
-  },
-  {
-    key: 'effort',
-    modes: ['commits-tokens', 'commits-output', 'commits-cost', 'commits-notes'],
-  },
-];
-
-function getVsCategoryKey(mode: VsModeKey): VsCategoryKey {
-  for (const cat of VS_CATEGORIES) {
-    if ((cat.modes as readonly string[]).includes(mode)) {
-      return cat.key;
-    }
-  }
-  return 'llm';
-}
-
-function getVsCategory(key: VsCategoryKey): VsCategory {
-  return VS_CATEGORIES.find((c) => c.key === key) || VS_CATEGORIES[0];
-}
-
 export default function OverviewRoute() {
   const { t, locale } = useTranslation();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -655,10 +730,27 @@ export default function OverviewRoute() {
   const [daily, setDaily] = useState<DailyCombinedRow[]>([]);
   const [obsidianActivity, setObsidianActivity] = useState<ObsidianActivityDay[]>([]);
   const [trafficSeries, setTrafficSeries] = useState<TrafficTimeseriesResponse | null>(null);
+  // Per-repo daily npm downloads — feeds the cumul view's per-project
+  // proportional stacking when the metric is `npm`.
+  const [npmByRepo, setNpmByRepo] = useState<NpmDailyByRepoRow[]>([]);
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [heatmapMetric, setHeatmapMetric] = useState<HeatmapMetric>('contrib');
-  const [vsMode, setVsMode] = useState<VsModeKey>('cld-cdx-tokens');
+  // View toggle: calendar grid (existing) vs cumulative stacked bars.
+  // Defaults to grid so the page reads the same on first paint.
+  const [heatmapView, setHeatmapView] = useState<'grid' | 'cumul'>('grid');
+  // Granularity for the cumul view. 'month' default — 12 columns reads
+  // cleanly. 'all' collapses everything into one bar (sliding-year total).
+  const [heatmapBucket, setHeatmapBucket] = useState<CumulBucket>('month');
+  // Modular comparator: pick any two metrics to chart against each other.
+  // Defaults to the canonical "Claude vs Codex fresh tokens" so the page
+  // lands on a meaningful signal — but the picker is now free-form.
+  const [vsA, setVsA] = useState<MetricKey>('tokensClaudeFresh');
+  const [vsB, setVsB] = useState<MetricKey>('tokensCodexFresh');
+  // Comparator window in days, or 'all' for the full available range
+  // (capped at 365 d by the upstream fetches). Defaults to 14 d to match
+  // the previous fixed behaviour.
+  const [vsWindow, setVsWindow] = useState<VsWindow>('14');
 
   useEffect(() => {
     let mounted = true;
@@ -671,9 +763,18 @@ export default function OverviewRoute() {
       apiGet<ObsidianActivityDay[]>('/api/obsidian/activity?days=365'),
       apiGet<TrafficTimeseriesResponse>('/api/github/traffic/timeseries?days=365'),
       apiGet<SettingsResponse>('/api/settings'),
+      apiGet<NpmDailyByRepoResponse>('/api/github/npm/daily-by-repo?days=365'),
     ])
       .then(
-        ([projectsData, heatmapData, dailyData, obsidianData, trafficSeriesData, settingsData]) => {
+        ([
+          projectsData,
+          heatmapData,
+          dailyData,
+          obsidianData,
+          trafficSeriesData,
+          settingsData,
+          npmByRepoData,
+        ]) => {
           if (!mounted) {
             return;
           }
@@ -683,6 +784,7 @@ export default function OverviewRoute() {
           setObsidianActivity(obsidianData || []);
           setTrafficSeries(trafficSeriesData);
           setSettings(settingsData);
+          setNpmByRepo(npmByRepoData.rows || []);
         },
       )
       .catch((e) => {
@@ -712,6 +814,10 @@ export default function OverviewRoute() {
           heatmapMetric === 'views' ? Number(row.viewsCount || 0) : Number(row.clonesCount || 0);
         dataByDate.set(row.date, (dataByDate.get(row.date) || 0) + v);
       }
+    } else if (heatmapMetric === 'npm') {
+      for (const row of npmByRepo) {
+        dataByDate.set(row.date, (dataByDate.get(row.date) || 0) + Number(row.downloads || 0));
+      }
     } else if (heatmapMetric === 'notes') {
       for (const d of obsidianActivity) {
         dataByDate.set(d.date, d.notes);
@@ -738,7 +844,88 @@ export default function OverviewRoute() {
     const config = HEATMAP_METRIC_CONFIG[heatmapMetric];
     const localizedLabel = t(`overview.heatmap.${metricLabelKey(heatmapMetric)}`);
     return { days, total, palette: config.palette, label: localizedLabel, unit: config.unit };
-  }, [heatmap, heatmapMetric, daily, obsidianActivity, trafficSeries, t]);
+  }, [heatmap, heatmapMetric, daily, obsidianActivity, trafficSeries, npmByRepo, t]);
+
+  // Per-repo daily series for the cumul stacked-bars view. We build all
+  // three (views/clones/npm) eagerly — switching metric is a free toggle.
+  // For metrics without a per-repo breakdown (contrib / llm-* / notes),
+  // we fall back to a single-key series so the cumul view still renders
+  // (one neutral coloured stack instead of N project segments).
+  const heatmapStackedDaily = useMemo(() => {
+    const buildPerRepo = (
+      rows: Array<{ date: string; repo: string; value: number }>,
+    ): StackedDailyRow[] => {
+      const map = new Map<string, Record<string, number>>();
+      for (const r of rows) {
+        if (!r.repo || r.value <= 0) continue;
+        const bucket = map.get(r.date) ?? {};
+        bucket[r.repo] = (bucket[r.repo] ?? 0) + r.value;
+        map.set(r.date, bucket);
+      }
+      return [...map.entries()]
+        .map(([date, values]) => ({ date, values }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+    };
+
+    const buildSingle = (
+      rows: Array<{ date: string; value: number }>,
+      key: string,
+    ): StackedDailyRow[] => {
+      const map = new Map<string, number>();
+      for (const r of rows) {
+        if (r.value <= 0) continue;
+        map.set(r.date, (map.get(r.date) ?? 0) + r.value);
+      }
+      return [...map.entries()]
+        .map(([date, total]) => ({ date, values: { [key]: total } }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+    };
+
+    const views = buildPerRepo(
+      (trafficSeries?.rows || []).map((r) => ({
+        date: r.date,
+        repo: r.repo,
+        value: Number(r.viewsCount || 0),
+      })),
+    );
+    const clones = buildPerRepo(
+      (trafficSeries?.rows || []).map((r) => ({
+        date: r.date,
+        repo: r.repo,
+        value: Number(r.clonesCount || 0),
+      })),
+    );
+    const npm = buildPerRepo(
+      npmByRepo.map((r) => ({
+        date: r.date,
+        repo: r.repo,
+        value: Number(r.downloads || 0),
+      })),
+    );
+
+    const contrib = buildSingle(
+      (heatmap?.days || []).map((d) => ({ date: d.date, value: d.count })),
+      'contrib',
+    );
+    const notes = buildSingle(
+      obsidianActivity.map((d) => ({ date: d.date, value: d.notes })),
+      'notes',
+    );
+    const llmTotal = buildSingle(
+      daily.map((r) => ({ date: String(r.date), value: Number(r.totalTokens || 0) })),
+      'tokens',
+    );
+    const llmClaude = buildSingle(
+      daily.map((r) => ({ date: String(r.date), value: Number(r.claudeTokens || 0) })),
+      'tokens',
+    );
+    const llmCodex = buildSingle(
+      daily.map((r) => ({ date: String(r.date), value: Number(r.codexTokens || 0) })),
+      'tokens',
+    );
+
+    return { views, clones, npm, contrib, notes, llmTotal, llmClaude, llmCodex };
+  }, [heatmap, daily, obsidianActivity, trafficSeries, npmByRepo]);
 
   const model = useMemo(() => {
     const today = startOfUtcDay(new Date());
@@ -853,6 +1040,14 @@ export default function OverviewRoute() {
         row.date,
         (clonesUniquesByDate.get(row.date) || 0) + Number(row.clonesUniques || 0),
       );
+    }
+
+    // NPM downloads aggregated across packages per date — feeds the
+    // Comparator's "NPM downloads" metric (one of the recently exposed
+    // levers the user wants to plot against tokens / commits / cost).
+    const npmByDate = new Map<string, number>();
+    for (const row of npmByRepo) {
+      npmByDate.set(row.date, (npmByDate.get(row.date) || 0) + Number(row.downloads || 0));
     }
 
     // Cartes top-level : signaux les plus actionnables sur 7 j vs 7 j précédents.
@@ -987,6 +1182,7 @@ export default function OverviewRoute() {
         clones: clonesByDate.get(date) || 0,
         viewsUniques: viewsUniquesByDate.get(date) || 0,
         clonesUniques: clonesUniquesByDate.get(date) || 0,
+        npm: npmByDate.get(date) || 0,
         claudeTokens: claudeTokensByDate.get(date) || 0,
         codexTokens: codexByDate.get(date) || 0,
         claudeCost: claudeCostByDate.get(date) || 0,
@@ -1032,39 +1228,203 @@ export default function OverviewRoute() {
       subClaudeUsd: subPerVendor.claude,
       subCodexUsd: subPerVendor.codex,
     };
-  }, [projects, heatmap, daily, obsidianActivity, trafficSeries, settings, t]);
+  }, [projects, heatmap, daily, obsidianActivity, trafficSeries, npmByRepo, settings, t]);
 
-  const vsCategory = getVsCategoryKey(vsMode);
+  // Variable-window comparator series. Built independently from the
+  // 14-day `model.recentCombined` so changing the window doesn't trigger
+  // the (heavier) overview-model rebuild. Inlined parsing mirrors the
+  // logic in `model.usageDays` — kept duplicated rather than refactored
+  // to keep the change scoped to this section.
+  const vsCombined = useMemo<CombinedDay[]>(() => {
+    const today = startOfUtcDay(new Date());
+    const todayIso = isoUtcDay(today);
+    // For 'all' we use the earliest date present in any source. Capped
+    // implicitly at 365 d by the upstream daily-combined fetch — anything
+    // older just won't render because we have no row for it.
+    let startIso: string;
+    if (vsWindow === 'all') {
+      const earliest = [
+        ...(heatmap?.days || []).map((d) => d.date),
+        ...daily.map((r) => String(r.date)),
+        ...obsidianActivity.map((d) => d.date),
+        ...(trafficSeries?.rows || []).map((r) => r.date),
+        ...npmByRepo.map((r) => r.date),
+      ]
+        .filter((d) => typeof d === 'string' && d.length === 10)
+        .sort();
+      startIso = earliest[0] || todayIso;
+    } else {
+      const days = Number.parseInt(vsWindow, 10) || 14;
+      startIso = isoUtcDay(addUtcDays(today, -(days - 1)));
+    }
+
+    // Reuse the same per-date parsing as `model` (codex fresh = total −
+    // cached_input, etc.). One pass, no duplication of Map building since
+    // it stays local to this memo.
+    const usageByDate = new Map<
+      string,
+      {
+        tokens: number;
+        cost: number;
+        claudeTokens: number;
+        codexTokens: number;
+        claudeCost: number;
+        codexCost: number;
+        claudeFreshTokens: number;
+        codexFreshTokens: number;
+        claudeOutputTokens: number;
+        codexOutputTokens: number;
+        claudeSubCost: number;
+        codexSubCost: number;
+        claudeCacheTotalTokens: number;
+        codexCacheTotalTokens: number;
+        activeTokens: number;
+        cachedTokens: number;
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheCreateTokens: number;
+        codexReasoningTokens: number;
+        codexResponseTokens: number;
+      }
+    >();
+    for (const row of daily) {
+      const date = String(row.date);
+      if (date < startIso || date > todayIso) continue;
+      const claudeInput = Number(row.claudeInputTokens || 0);
+      const claudeOutput = Number(row.claudeOutputTokens || 0);
+      const claudeCacheCreate = Number(row.claudeCacheCreateTokens || 0);
+      const claudeCacheRead = Number(row.claudeCacheReadTokens || 0);
+      const codexInputTotal = Number(row.codexInputTokens || 0);
+      const codexCached = Number(row.codexCachedInputTokens || 0);
+      const codexFreshInput = Math.max(0, codexInputTotal - codexCached);
+      const codexOutput = Number(row.codexOutputTokens || 0);
+      const codexReasoning = Number(row.codexReasoningOutputTokens || 0);
+      const claudeFresh = claudeInput + claudeOutput;
+      const codexFresh = codexFreshInput + codexOutput + codexReasoning;
+      usageByDate.set(date, {
+        tokens: Number(row.totalTokens || 0),
+        cost: Number(row.totalCostUsd || 0),
+        claudeTokens: Number(row.claudeTokens || 0),
+        codexTokens: Number(row.codexTokens || 0),
+        claudeCost: Number(row.claudeCostUsd || 0),
+        codexCost: Number(row.codexCostUsd || 0),
+        claudeFreshTokens: claudeFresh,
+        codexFreshTokens: codexFresh,
+        claudeOutputTokens: claudeOutput,
+        codexOutputTokens: codexOutput,
+        claudeSubCost: Number(row.claudeSubCostUsd || 0),
+        codexSubCost: Number(row.codexSubCostUsd || 0),
+        claudeCacheTotalTokens: claudeCacheCreate + claudeCacheRead,
+        codexCacheTotalTokens: codexCached,
+        activeTokens: claudeFresh + codexFresh,
+        cachedTokens: claudeCacheRead + claudeCacheCreate + codexCached,
+        inputTokens: claudeInput + codexFreshInput,
+        outputTokens: claudeOutput + codexOutput + codexReasoning,
+        cacheReadTokens: claudeCacheRead + codexCached,
+        cacheCreateTokens: claudeCacheCreate,
+        codexReasoningTokens: codexReasoning,
+        codexResponseTokens: codexOutput,
+      });
+    }
+
+    const githubByDate = new Map<string, number>();
+    for (const d of heatmap?.days || []) {
+      githubByDate.set(d.date, Number(d.count || 0));
+    }
+    const notesByDate = new Map<string, number>();
+    for (const d of obsidianActivity) {
+      notesByDate.set(d.date, Number(d.notes || 0));
+    }
+    const viewsByDate = new Map<string, number>();
+    const viewsUniquesByDate = new Map<string, number>();
+    const clonesByDate = new Map<string, number>();
+    const clonesUniquesByDate = new Map<string, number>();
+    for (const r of trafficSeries?.rows || []) {
+      viewsByDate.set(r.date, (viewsByDate.get(r.date) || 0) + Number(r.viewsCount || 0));
+      viewsUniquesByDate.set(
+        r.date,
+        (viewsUniquesByDate.get(r.date) || 0) + Number(r.viewsUniques || 0),
+      );
+      clonesByDate.set(r.date, (clonesByDate.get(r.date) || 0) + Number(r.clonesCount || 0));
+      clonesUniquesByDate.set(
+        r.date,
+        (clonesUniquesByDate.get(r.date) || 0) + Number(r.clonesUniques || 0),
+      );
+    }
+    const npmByDate = new Map<string, number>();
+    for (const r of npmByRepo) {
+      npmByDate.set(r.date, (npmByDate.get(r.date) || 0) + Number(r.downloads || 0));
+    }
+
+    const out: CombinedDay[] = [];
+    for (
+      let cursor = new Date(`${startIso}T00:00:00Z`);
+      cursor <= today;
+      cursor = addUtcDays(cursor, 1)
+    ) {
+      const date = isoUtcDay(cursor);
+      const u = usageByDate.get(date);
+      out.push({
+        date,
+        github: githubByDate.get(date) || 0,
+        tokens: u?.tokens || 0,
+        cost: u?.cost || 0,
+        notes: notesByDate.get(date) || 0,
+        views: viewsByDate.get(date) || 0,
+        clones: clonesByDate.get(date) || 0,
+        viewsUniques: viewsUniquesByDate.get(date) || 0,
+        clonesUniques: clonesUniquesByDate.get(date) || 0,
+        npm: npmByDate.get(date) || 0,
+        claudeTokens: u?.claudeTokens || 0,
+        codexTokens: u?.codexTokens || 0,
+        claudeCost: u?.claudeCost || 0,
+        codexCost: u?.codexCost || 0,
+        claudeSubCost: u?.claudeSubCost || 0,
+        codexSubCost: u?.codexSubCost || 0,
+        claudeCacheTotalTokens: u?.claudeCacheTotalTokens || 0,
+        codexCacheTotalTokens: u?.codexCacheTotalTokens || 0,
+        claudeFreshTokens: u?.claudeFreshTokens || 0,
+        codexFreshTokens: u?.codexFreshTokens || 0,
+        claudeOutputTokens: u?.claudeOutputTokens || 0,
+        codexOutputTokens: u?.codexOutputTokens || 0,
+        activeTokens: u?.activeTokens || 0,
+        cachedTokens: u?.cachedTokens || 0,
+        inputTokens: u?.inputTokens || 0,
+        outputTokens: u?.outputTokens || 0,
+        cacheReadTokens: u?.cacheReadTokens || 0,
+        cacheCreateTokens: u?.cacheCreateTokens || 0,
+        codexReasoningTokens: u?.codexReasoningTokens || 0,
+        codexResponseTokens: u?.codexResponseTokens || 0,
+      });
+    }
+    return out;
+  }, [vsWindow, heatmap, daily, obsidianActivity, trafficSeries, npmByRepo]);
 
   const vsData = useMemo(() => {
-    const base = VS_MODES[vsMode];
-    // Overlay text fields with locale translations — structural fields (functions, colors, scale) stay from base.
-    const config: VsModeConfig = {
-      ...base,
-      segLabel: t(`overview.vsModes.${vsMode}.segLabel`),
-      title: t(`overview.vsModes.${vsMode}.title`),
-      legendA: t(`overview.vsModes.${vsMode}.legendA`),
-      legendB: t(`overview.vsModes.${vsMode}.legendB`),
-      leverageLabel: t(`overview.vsModes.${vsMode}.leverageLabel`),
-      insight: t(`overview.vsModes.${vsMode}.insight`),
-    };
+    const a = METRICS[vsA];
+    const b = METRICS[vsB];
     const ctx: VsModeCtx = {
       subDailyUsd: model.subDailyUsd,
       subClaudeUsd: model.subClaudeUsd,
       subCodexUsd: model.subCodexUsd,
     };
-    const rows = model.recentCombined.map((day) => ({
-      aRaw: config.getA(day),
-      bRaw: config.getB(day, ctx),
+    const rows = vsCombined.map((day) => ({
+      aRaw: a.getter(day, ctx),
+      bRaw: b.getter(day, ctx),
       date: day.date,
     }));
     const maxA = Math.max(1, ...rows.map((r) => r.aRaw));
     const maxB = Math.max(1, ...rows.map((r) => r.bRaw));
     const totalA = rows.reduce((acc, r) => acc + r.aRaw, 0);
     const totalB = rows.reduce((acc, r) => acc + r.bRaw, 0);
+    // Same unit → both series share the same Y reference (so absolute
+    // magnitudes are visually comparable). Different units → each series
+    // is normalised against its own max (you compare SHAPES, not levels).
+    const sharedScale = a.unit === b.unit;
     const sharedMax = Math.max(maxA, maxB);
-    const denomA = config.sharedScale ? sharedMax : maxA;
-    const denomB = config.sharedScale ? sharedMax : maxB;
+    const denomA = sharedScale ? sharedMax : maxA;
+    const denomB = sharedScale ? sharedMax : maxB;
     const chart = rows.map((r) => ({
       dateLabel: r.date.slice(5),
       aRaw: r.aRaw,
@@ -1072,8 +1432,27 @@ export default function OverviewRoute() {
       aIndex: (r.aRaw / denomA) * 100,
       bIndex: (r.bRaw / denomB) * 100,
     }));
-    return { config, chart, totalA, totalB, ctx };
-  }, [vsMode, model.recentCombined, model.subDailyUsd, model.subClaudeUsd, model.subCodexUsd, t]);
+    // If A and B happen to share the same default colour (e.g. two
+    // claude-tinted metrics), force a contrasting accent on B so the two
+    // lines don't visually merge.
+    const colorA = a.color;
+    const colorB = a.color === b.color ? '#ff9500' : b.color;
+    const labelA = t(`overview.comparator.metrics.${a.key}`);
+    const labelB = t(`overview.comparator.metrics.${b.key}`);
+    return {
+      a,
+      b,
+      colorA,
+      colorB,
+      labelA,
+      labelB,
+      sharedScale,
+      chart,
+      totalA,
+      totalB,
+      ctx,
+    };
+  }, [vsA, vsB, vsCombined, model.subDailyUsd, model.subClaudeUsd, model.subCodexUsd, t]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -1102,6 +1481,7 @@ export default function OverviewRoute() {
               { value: 'contrib', label: t('overview.heatmap.contrib') },
               { value: 'views', label: t('overview.heatmap.views') },
               { value: 'clones', label: t('overview.heatmap.clones') },
+              { value: 'npm', label: t('overview.heatmap.npm') },
               { value: 'llm-total', label: 'LLM' },
               { value: 'llm-claude', label: 'Claude' },
               { value: 'llm-codex', label: 'Codex' },
@@ -1112,39 +1492,100 @@ export default function OverviewRoute() {
         }
       >
         <Card>
-          <Heatmap
-            days={unifiedHeatmap.days}
-            palette={unifiedHeatmap.palette}
-            totalLabel={unifiedHeatmap.unit}
-            totalValue={unifiedHeatmap.total}
-          />
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <Segmented<'grid' | 'cumul'>
+              value={heatmapView}
+              options={[
+                { value: 'grid', label: t('overview.heatmap.viewGrid') },
+                { value: 'cumul', label: t('overview.heatmap.viewCumul') },
+              ]}
+              onChange={setHeatmapView}
+            />
+            {heatmapView === 'cumul' ? (
+              <Segmented<CumulBucket>
+                value={heatmapBucket}
+                options={[
+                  { value: 'day', label: t('overview.heatmap.bucketDay') },
+                  { value: 'week', label: t('overview.heatmap.bucket7d') },
+                  { value: 'biweekly', label: t('overview.heatmap.bucket14d') },
+                  { value: 'month', label: t('overview.heatmap.bucket30d') },
+                  { value: 'all', label: t('overview.heatmap.bucketAll') },
+                ]}
+                onChange={setHeatmapBucket}
+              />
+            ) : null}
+          </div>
+
+          {heatmapView === 'grid' ? (
+            <Heatmap
+              days={unifiedHeatmap.days}
+              palette={unifiedHeatmap.palette}
+              totalLabel={unifiedHeatmap.unit}
+              totalValue={unifiedHeatmap.total}
+            />
+          ) : (
+            (() => {
+              const groupBy: GroupBy = heatmapBucket === 'all' ? 'year' : heatmapBucket;
+              const stacked: StackedDailyRow[] =
+                heatmapMetric === 'views'
+                  ? heatmapStackedDaily.views
+                  : heatmapMetric === 'clones'
+                    ? heatmapStackedDaily.clones
+                    : heatmapMetric === 'npm'
+                      ? heatmapStackedDaily.npm
+                      : heatmapMetric === 'contrib'
+                        ? heatmapStackedDaily.contrib
+                        : heatmapMetric === 'notes'
+                          ? heatmapStackedDaily.notes
+                          : heatmapMetric === 'llm-claude'
+                            ? heatmapStackedDaily.llmClaude
+                            : heatmapMetric === 'llm-codex'
+                              ? heatmapStackedDaily.llmCodex
+                              : heatmapStackedDaily.llmTotal;
+              // Cumul X-axis runs from Jan 1 of the displayed year to TODAY
+              // (clamped). Past today is the future — no point rendering
+              // forward-extrapolated buckets that just carry the cumul flat.
+              const year = heatmap?.year || new Date().getUTCFullYear();
+              const todayIso = new Date().toISOString().slice(0, 10);
+              const yearEnd = `${year}-12-31`;
+              const toDate = todayIso < yearEnd ? todayIso : yearEnd;
+              const palette =
+                HEATMAP_METRIC_CONFIG[heatmapMetric].palette === 'amber'
+                  ? 'amber'
+                  : HEATMAP_METRIC_CONFIG[heatmapMetric].palette === 'cyan'
+                    ? 'cyan'
+                    : 'github';
+              return (
+                <HeatmapStackedBars
+                  daily={stacked}
+                  fromDate={`${year}-01-01`}
+                  toDate={toDate}
+                  groupBy={groupBy}
+                  cumulative
+                  scheme={palette}
+                  totalLabel={unifiedHeatmap.unit}
+                  height={260}
+                />
+              );
+            })()
+          )}
         </Card>
       </Section>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.5fr_1fr]">
         <Section
-          actionWide
           title={t('overview.comparator.title')}
-          meta={t('overview.comparator.subtitle', {
-            modeTitle: vsData.config.title ?? '',
+          meta={t('overview.comparator.subtitleModular', {
+            window:
+              vsWindow === 'all'
+                ? t('overview.comparator.windowAll')
+                : t('overview.comparator.windowDays', { n: vsWindow }),
+            scaleHint: vsData.sharedScale
+              ? t('overview.comparator.scaleShared')
+              : t('overview.comparator.scaleIndependent'),
           })}
-          action={
-            <Segmented<VsCategoryKey>
-              value={vsCategory}
-              options={VS_CATEGORIES.map((c) => ({
-                value: c.key,
-                label: t(`overview.comparator.categories.${c.key}`),
-              }))}
-              onChange={(key) => {
-                const next = getVsCategory(key).modes[0];
-                if (next) {
-                  setVsMode(next);
-                }
-              }}
-            />
-          }
         >
-          {model.recentCombined.length === 0 ? (
+          {vsCombined.length === 0 ? (
             <Card>
               <p className="text-sm text-[var(--text-dim)]">
                 {t('overview.comparator.notEnoughData')}
@@ -1152,29 +1593,58 @@ export default function OverviewRoute() {
             </Card>
           ) : (
             <Card>
-              <div className="mb-4 flex flex-wrap items-center gap-1.5">
-                {getVsCategory(vsCategory).modes.map((key) => {
-                  const cfg = VS_MODES[key];
-                  const active = key === vsMode;
+              {/* Modular picker: two grouped <select>s drive the chart.
+                  Native <select> handles 30+ options across 6 categories
+                  more cleanly than chip lists; <optgroup> mirrors
+                  METRIC_CATEGORIES so the user can scan by family. */}
+              <div className="mb-3 flex flex-wrap items-center gap-2 text-[12px]">
+                <span className="text-[var(--text-dim)]">
+                  {t('overview.comparator.compareLabel')}
+                </span>
+                <MetricSelect value={vsA} onChange={setVsA} accentColor={vsData.colorA} />
+                <span className="text-[var(--text-dim)]">{t('common.vs')}</span>
+                <MetricSelect value={vsB} onChange={setVsB} accentColor={vsData.colorB} />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const a = vsA;
+                    setVsA(vsB);
+                    setVsB(a);
+                  }}
+                  className="rounded-full border border-[var(--border)] bg-[var(--surface-1)] px-2.5 py-1 text-[11px] text-[var(--text-dim)] hover:border-[var(--border-strong)] hover:text-[var(--text)]"
+                  title={t('overview.comparator.swap')}
+                  aria-label={t('overview.comparator.swap')}
+                >
+                  ⇄
+                </button>
+              </div>
+
+              {/* Window selector. Compact pill row — mirrors the Period
+                  band on the Usage page so the user already knows the
+                  control. flex-wrap keeps it readable on narrow viewports. */}
+              <div className="mb-4 flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span className="mr-1 text-[var(--text-dim)]">
+                  {t('overview.comparator.windowLabel')}
+                </span>
+                {VS_WINDOWS.map((w) => {
+                  const active = w === vsWindow;
+                  const label =
+                    w === 'all'
+                      ? t('overview.comparator.windowAll')
+                      : t('overview.comparator.windowDays', { n: w });
                   return (
                     <button
-                      key={key}
+                      key={w}
                       type="button"
-                      onClick={() => setVsMode(key)}
-                      className={`group inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-medium transition-all ${active ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]' : 'border-[var(--border)] bg-[var(--surface-1)] text-[var(--text-dim)] hover:border-[var(--border-strong)] hover:text-[var(--text)]'}`}
+                      onClick={() => setVsWindow(w)}
                       aria-pressed={active}
+                      className={`rounded-full border px-2.5 py-0.5 transition ${
+                        active
+                          ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
+                          : 'border-[var(--border)] text-[var(--text-dim)] hover:border-[var(--border-strong)] hover:text-[var(--text)]'
+                      }`}
                     >
-                      <span
-                        aria-hidden="true"
-                        className="h-1.5 w-1.5 rounded-full"
-                        style={{ backgroundColor: cfg.colorA }}
-                      />
-                      {t(`overview.vsModes.${key}.segLabel`)}
-                      <span
-                        aria-hidden="true"
-                        className="h-1.5 w-1.5 rounded-full"
-                        style={{ backgroundColor: cfg.colorB }}
-                      />
+                      {label}
                     </button>
                   );
                 })}
@@ -1182,18 +1652,18 @@ export default function OverviewRoute() {
 
               <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <VsKpi
-                  label={vsData.config.legendA ?? ''}
-                  value={vsData.config.formatValue(vsData.totalA)}
-                  color={vsData.config.colorA}
+                  label={vsData.labelA}
+                  value={formatMetricValue(vsData.totalA, vsData.a.unit)}
+                  color={vsData.colorA}
                 />
                 <VsKpi
-                  label={vsData.config.legendB ?? ''}
-                  value={vsData.config.formatValue(vsData.totalB)}
-                  color={vsData.config.colorB}
+                  label={vsData.labelB}
+                  value={formatMetricValue(vsData.totalB, vsData.b.unit)}
+                  color={vsData.colorB}
                 />
                 <VsKpi
-                  label={vsData.config.leverageLabel ?? ''}
-                  value={vsData.config.leverageValue(vsData.totalA, vsData.totalB, vsData.ctx)}
+                  label={`${vsData.labelA} / ${vsData.labelB}`}
+                  value={formatLeverage(vsData.totalA, vsData.totalB, vsData.a.unit, vsData.b.unit)}
                   color="var(--text)"
                   accent
                 />
@@ -1233,14 +1703,12 @@ export default function OverviewRoute() {
                           item as { payload?: { aRaw: number; bRaw: number } } | undefined
                         )?.payload;
                         const label = String(name ?? '');
-                        if (!row) {
-                          return ['0', label];
+                        if (!row) return ['0', label];
+                        if (label === vsData.labelA) {
+                          return [formatMetricValue(row.aRaw, vsData.a.unit), label];
                         }
-                        if (label === vsData.config.legendA) {
-                          return [vsData.config.formatValue(row.aRaw), label];
-                        }
-                        if (label === vsData.config.legendB) {
-                          return [vsData.config.formatValue(row.bRaw), label];
+                        if (label === vsData.labelB) {
+                          return [formatMetricValue(row.bRaw, vsData.b.unit), label];
                         }
                         return ['0', label];
                       }}
@@ -1249,16 +1717,16 @@ export default function OverviewRoute() {
                     <Line
                       type="monotone"
                       dataKey="aIndex"
-                      name={vsData.config.legendA}
-                      stroke={vsData.config.colorA}
+                      name={vsData.labelA}
+                      stroke={vsData.colorA}
                       strokeWidth={2}
                       dot={false}
                     />
                     <Line
                       type="monotone"
                       dataKey="bIndex"
-                      name={vsData.config.legendB}
-                      stroke={vsData.config.colorB}
+                      name={vsData.labelB}
+                      stroke={vsData.colorB}
                       strokeWidth={2}
                       dot={false}
                     />
@@ -1266,7 +1734,16 @@ export default function OverviewRoute() {
                 </ResponsiveContainer>
               </div>
 
-              <p className="mt-3 text-[11px] text-[var(--text-faint)]">{vsData.config.insight}</p>
+              <p className="mt-3 text-[11px] text-[var(--text-faint)]">
+                {vsData.sharedScale
+                  ? t('overview.comparator.insightShared', {
+                      unit: t(`overview.comparator.units.${vsData.a.unit}`),
+                    })
+                  : t('overview.comparator.insightIndependent', {
+                      unitA: t(`overview.comparator.units.${vsData.a.unit}`),
+                      unitB: t(`overview.comparator.units.${vsData.b.unit}`),
+                    })}
+              </p>
             </Card>
           )}
         </Section>
@@ -1358,6 +1835,51 @@ function VsKpi({
   );
 }
 
+function MetricSelect({
+  value,
+  onChange,
+  accentColor,
+}: {
+  value: MetricKey;
+  onChange: (next: MetricKey) => void;
+  accentColor: string;
+}) {
+  const { t } = useTranslation();
+  // Group metrics by category so the user can scan by family. Native
+  // <select> with <optgroup> is the right primitive for ~30 options —
+  // searchable from the keyboard, accessible, and zero ad-hoc UI work.
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span
+        aria-hidden="true"
+        className="h-2 w-2 rounded-full"
+        style={{ backgroundColor: accentColor }}
+      />
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as MetricKey)}
+        className="rounded-md border border-[var(--border)] bg-[var(--surface-1)] px-2 py-1 text-[12px] text-[var(--text)] hover:border-[var(--border-strong)] focus:border-[var(--accent)] focus:outline-none"
+      >
+        {METRIC_CATEGORIES.map((cat) => {
+          const items = (Object.keys(METRICS) as MetricKey[]).filter(
+            (k) => METRICS[k].category === cat,
+          );
+          if (items.length === 0) return null;
+          return (
+            <optgroup key={cat} label={t(`overview.comparator.categories.${cat}`)}>
+              {items.map((k) => (
+                <option key={k} value={k}>
+                  {t(`overview.comparator.metrics.${k}`)}
+                </option>
+              ))}
+            </optgroup>
+          );
+        })}
+      </select>
+    </span>
+  );
+}
+
 const METRIC_META = {
   github: { color: '#30d158', unit: 'commits' },
   tokens: { color: '#64d2ff', unit: 'tokens' },
@@ -1367,7 +1889,10 @@ const METRIC_META = {
   clones: { color: '#ff9500', unit: 'clones' },
 } as const;
 
-type MetricKey = keyof typeof METRIC_META;
+// Subset of metric keys used by the lightweight Daily breakdown component
+// below — distinct from the comparator's exhaustive `MetricKey`. Renamed
+// to avoid the type-name collision when both lived in the same file.
+type MiniMetricKey = keyof typeof METRIC_META;
 
 const WEEKDAY_HEADERS = ['L', 'M', 'M', 'J', 'V', 'S', 'D'] as const;
 
@@ -1499,7 +2024,7 @@ function DailyBreakdown({
 
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-dim)]">
         <div className="flex flex-wrap items-center gap-3">
-          {(Object.keys(METRIC_META) as MetricKey[]).map((key) => (
+          {(Object.keys(METRIC_META) as MiniMetricKey[]).map((key) => (
             <span key={key} className="inline-flex items-center gap-1.5">
               <span
                 className="inline-block h-1.5 w-4 rounded-full"

@@ -35,7 +35,7 @@ export type StackedBucketRow = {
   total: number;
 };
 
-export type GroupBy = 'day' | 'week' | 'biweekly' | 'month' | 'quarter';
+export type GroupBy = 'day' | 'week' | 'biweekly' | 'month' | 'quarter' | 'year';
 
 /**
  * Bucket key from a YYYY-MM-DD date.
@@ -48,12 +48,15 @@ export type GroupBy = 'day' | 'week' | 'biweekly' | 'month' | 'quarter';
  *              user zooms a 12-month window in/out.
  *   month    → first of the month
  *   quarter  → first day of the quarter (Jan 1, Apr 1, Jul 1, Oct 1)
+ *   year     → first day of the year (= 'all-time' single-bar mode on a
+ *              year-window: collapses everything into one column)
  *
  * Plain string + UTC date ops avoid timezone drift — DB dates are already
  * stored as YYYY-MM-DD UTC strings and we want bucketing to match exactly.
  */
 export function bucketOf(date: string, groupBy: GroupBy): string {
   if (groupBy === 'day') return date;
+  if (groupBy === 'year') return `${date.slice(0, 4)}-01-01`;
   if (groupBy === 'month') return `${date.slice(0, 7)}-01`;
   if (groupBy === 'quarter') {
     const month = Number.parseInt(date.slice(5, 7), 10);
@@ -99,6 +102,7 @@ export function enumerateBuckets(fromDate: string, toDate: string, groupBy: Grou
     else if (groupBy === 'week') d.setUTCDate(d.getUTCDate() + 7);
     else if (groupBy === 'biweekly') d.setUTCDate(d.getUTCDate() + 14);
     else if (groupBy === 'quarter') d.setUTCMonth(d.getUTCMonth() + 3, 1);
+    else if (groupBy === 'year') d.setUTCFullYear(d.getUTCFullYear() + 1, 0, 1);
     else {
       // 'month': roll to first-of-next-month (handles year wraparound).
       d.setUTCMonth(d.getUTCMonth() + 1, 1);
