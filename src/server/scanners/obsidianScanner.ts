@@ -5,6 +5,7 @@ import matter from 'gray-matter';
 import type { Settings } from '../config';
 import { expandHomePath } from '../config';
 import { isSubPath } from '../lib/pathGuards';
+import { rebuildVaultHubs } from '../lib/vaultHubs';
 
 type RawLink = {
   target: string;
@@ -377,8 +378,24 @@ export async function reindexObsidianVault(
       tags: 0,
       durationMs: Math.round(performance.now() - started),
       vaultRoot,
-      warning: 'vault_not_found',
+      warning: 'vault_path_unreachable',
     };
+  }
+
+  // Rebuild folder hubs + project stubs BEFORE the link scan so freshly-
+  // promoted insights (Concepts/<slug>.md) and archived sessions
+  // (Sessions/<...>.md) gain inbound links from the auto _index.md hubs
+  // in the SAME pass — without this, the scheduler / watcher reindex
+  // ticks would index those notes as orphans until the user manually
+  // hit "Reindex Obsidian" in Settings (the only path that previously
+  // chained rebuildVaultHubs first).
+  // Failure-tolerant: a hub-write error (perm denied, disk full) shouldn't
+  // block the link scan — the warning is logged and we continue with the
+  // existing hubs as-is.
+  try {
+    await rebuildVaultHubs({ db, vaultRoot });
+  } catch (error) {
+    console.warn('[obsidianScanner] rebuildVaultHubs failed:', String(error));
   }
 
   const markdownFiles = await listMarkdownFiles(vaultRoot);
