@@ -45,45 +45,54 @@ type StaticEntry = { id: string; label: string; hintKey: string | null };
  * string). Better to expose known variants up-front than force the user
  * to remember IDs. Order matters: most-current / most-recommended first.
  */
+/**
+ * Curated catalogs aligned to the actual April 2026 surface area:
+ *  - Anthropic Models docs: https://platform.claude.com/docs/en/about-claude/models/overview
+ *  - Claude Code CLI: https://code.claude.com/docs/en/model-config
+ *  - OpenAI Codex models: https://developers.openai.com/codex/models
+ *
+ * Order: most recent / most recommended first, then dated variants for
+ * users pinning a specific cycle, then aliases. Removed entries that no
+ * longer resolve in April 2026 (gpt-5.0/5.1/5.2 codex deprecations,
+ * o3/o4 reasoning family which is OpenAI-API-only and never wired
+ * into the Codex CLI).
+ */
 const STATIC_CATALOG: Record<ProviderId, StaticEntry[]> = {
   claude: [
+    // Current frontier (1M context, adaptive thinking).
     { id: 'claude-opus-4-7', label: 'Opus 4.7', hintKey: 'agent.models.opus47' },
     { id: 'claude-opus-4-6', label: 'Opus 4.6', hintKey: 'agent.models.opus46' },
+    { id: 'claude-opus-4-5-20251101', label: 'Opus 4.5', hintKey: null },
+    { id: 'claude-opus-4-1-20250805', label: 'Opus 4.1', hintKey: null },
+    // Sonnet — balanced speed/intelligence.
     { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', hintKey: 'agent.models.sonnet46' },
-    { id: 'claude-sonnet-4-5', label: 'Sonnet 4.5', hintKey: null },
+    { id: 'claude-sonnet-4-5-20250929', label: 'Sonnet 4.5', hintKey: null },
+    // Haiku — fastest, cheapest.
     { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', hintKey: 'agent.models.haiku45' },
-    // Generic aliases the CLI resolves server-side to "latest of kind".
-    // Useful when you want Anthropic's current best without pinning a date.
+    // Aliases the CLI resolves server-side to "latest of kind". On
+    // Anthropic API: opus → 4.7, sonnet → 4.6, haiku → 4.5. On Bedrock
+    // / Vertex / Foundry the resolution may lag by one cycle.
     { id: 'opus', label: 'Opus (latest)', hintKey: null },
     { id: 'sonnet', label: 'Sonnet (latest)', hintKey: null },
     { id: 'haiku', label: 'Haiku (latest)', hintKey: null },
+    { id: 'best', label: 'Best (auto)', hintKey: null },
+    { id: 'opusplan', label: 'Opus Plan (hybrid)', hintKey: null },
+    // 1 M context variants — same models, larger window. Useful for long
+    // codebase walks; charged at 1M-tier pricing.
+    { id: 'opus[1m]', label: 'Opus 1M', hintKey: null },
+    { id: 'sonnet[1m]', label: 'Sonnet 1M', hintKey: null },
   ],
   codex: [
-    // OpenAI dotted versioning — current generation. Listed in descending
-    // recency so the selector defaults to "newest first".
+    // Current frontier — newest for complex coding, computer use, agentic.
+    // gpt-5.5 requires ChatGPT sign-in or proper API access.
     { id: 'gpt-5.5', label: 'GPT-5.5', hintKey: null },
+    // Flagship — industry-leading coding + reasoning, broad availability.
     { id: 'gpt-5.4', label: 'GPT-5.4', hintKey: 'agent.models.gpt54' },
+    { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', hintKey: null },
+    // Codex-tuned — runs ~25% faster than base GPT-5.3 on coding tasks.
     { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', hintKey: 'agent.models.gpt53codex' },
-    { id: 'gpt-5.3', label: 'GPT-5.3', hintKey: null },
-    { id: 'gpt-5.2', label: 'GPT-5.2', hintKey: null },
-    { id: 'gpt-5.1', label: 'GPT-5.1', hintKey: null },
-    // Dashed aliases (OpenAI's API-style naming) — separately bill-tiered
-    // in pricing.ts, so tracking them is worthwhile even if some users
-    // overlap with the dotted IDs above.
-    { id: 'gpt-5', label: 'GPT-5', hintKey: null },
-    { id: 'gpt-5-codex', label: 'GPT-5 Codex', hintKey: null },
-    { id: 'gpt-5-mini', label: 'GPT-5 Mini', hintKey: null },
-    { id: 'gpt-5-nano', label: 'GPT-5 Nano', hintKey: null },
-    // Reasoning-first family — cheaper per token but slower; good for
-    // agentic runs where latency is secondary.
-    { id: 'o4', label: 'o4', hintKey: null },
-    { id: 'o4-mini', label: 'o4 Mini', hintKey: null },
-    { id: 'o3', label: 'o3', hintKey: null },
-    { id: 'o3-mini', label: 'o3 Mini', hintKey: null },
-    // Legacy 4o: kept so long-running session projects still find their
-    // pinned model. Pricing stays known via pricing.ts.
-    { id: 'gpt-4o', label: 'GPT-4o', hintKey: null },
-    { id: 'gpt-4o-mini', label: 'GPT-4o Mini', hintKey: null },
+    // Research preview, Pro tier only — real-time iteration, text-only.
+    { id: 'gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark', hintKey: null },
   ],
 };
 
