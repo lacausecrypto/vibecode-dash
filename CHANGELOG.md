@@ -7,6 +7,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-04-30
+
+Patch release: agent CLI error diagnostics, refreshed model catalogs,
+UI fixes on tablet popovers + project rows.
+
+### Fixed
+
+- **Agent — codex stdout error extraction.** Codex CLI 0.121+ emits the real
+  upstream API error (`model_not_found`, `invalid_api_key`, etc.) as a
+  `type:"error"` or `type:"turn.failed"` NDJSON event in **stdout**, not
+  stderr. Stderr is full of rmcp transport noise that was drowning the signal.
+  New `extractCodexErrorFromStdout` walks the NDJSON and returns the most
+  actionable message (handles bare `message`, `error.message`, and
+  double-encoded JSON envelopes).
+- **Agent — friendly hints.** New `diagnoseCliError` pattern-matches the
+  extracted text and returns a localised one-liner via the server i18n dict.
+  Three rules: `model_not_found` (4xx from OpenAI / Anthropic), API key
+  missing/invalid, codex MCP transport (model alias missing from
+  `~/.codex/config.toml`). New keys: `agent.execHints.{codexMcpTransport,
+  modelNotFound, apiKey}` in fr / en / es.
+- **Agent — language policy in system prompt.** `buildSystemInstructions`
+  now prefixes a "reply in the SAME language as the latest USER message"
+  rule. Stops the model from mirroring the locale-bound mode addendum
+  when the user switches languages mid-conversation.
+- **UI — agent pane popovers escape bounds.** `.agent-pane` was `overflow:
+  hidden` to keep rounded corners crisp, but it also clipped the
+  new-session and more-options popovers' left edge on tablet widths.
+  Switched to `overflow: visible` (inner scroll containers own their
+  own overflow). Popover backdrop changed from translucent + `backdrop-
+  blur` to solid `#0b0d11` for readability.
+- **UI — project rows stack on tablet.** `ProjectRow` and `UsageRow` were
+  stacking only at < 640 px. On 768–1023 px tablets the metric strip
+  claimed ~440 px on its own, leaving < 200 px for the identity zone.
+  Bumped breakpoint to `lg` (1024 px) so tablets get the 2-row stack
+  with a 3-col metric grid; lg+ keeps the dense single-row layout.
+
+### Chore
+
+- **Agent model catalogs refreshed to April 2026 surface area** (Anthropic
+  + OpenAI Codex docs):
+  - Claude — adds Opus 4.5 / 4.1 dated variants, Sonnet 4.5 dated,
+    `best` / `opusplan` / `opus[1m]` / `sonnet[1m]` aliases.
+  - Codex — drops deprecations (gpt-5.0/5.1/5.2, o3/o4 family, gpt-4o*),
+    adds `gpt-5.4-mini` and `gpt-5.3-codex-spark`.
+- `.gitignore` excludes `CLAUDE.md` (local Claude Code project context, not
+  shipped in the published package).
+
+## [0.3.0] — 2026-04-30
+
+Big visual + structural release. Overview gains an NPM metric and a fully
+modular VS comparator; Usage gets a per-project cumul stacked-bars view
+with EUR cost; Radar gets an insights donut; Presence settings move under
+`/settings`; an Ask-agent quick-recap shortcut creates pre-loaded sessions.
+Server hardened (CSP, Markdown sanitizer, symlink check, cross-platform
+`isSubPath`). External shell deps dropped (ccusage local install, JSONL
+pure-JS walker). Mobile responsive polish across the dashboard.
+
+### Added — Overview, Usage, Radar visualisations
+
+- **Overview — NPM as a first-class metric.** Heatmap section toggle
+  now exposes "NPM" alongside Contribs, Views, Clones, LLM*, Notes.
+  Per-repo aggregates fed by `/api/github/npm/daily-by-repo`.
+- **Overview — Heatmap cumul view.** New Grille / Cumul toggle. Cumul
+  swaps Heatmap for HeatmapStackedBars and stacks per-repo cumulative
+  totals over a year window. Cumul lib gains a `year` bucket (single-
+  column "all-time" headline).
+- **Overview — modular VS comparator.** Replaces the hard-coded
+  10-mode enum with a dynamic A vs B picker. METRIC_DEFS catalogues
+  every signal (LLM tokens variants, cache, cost, GitHub commits/views/
+  clones/uniques, NPM downloads, vault notes) tagged with category +
+  unit. The chart auto-detects whether to share the Y axis (same unit)
+  or render two independent scales, with a per-mode insight string.
+  Window selector goes 1 d → all-time. Section header has a swap A↔B
+  button.
+- **Usage — per-project cumul stacked-bars view** (tokens or EUR cost,
+  granularity Jour → Trim.) backed by a new
+  `/api/usage/by-project/stacked-daily` endpoint. The cost view stacks
+  the same time-weighted subscription accrual ("ABO RÉEL") the user
+  is already calibrated on from the project list.
+- **Radar — insights mix donut + 2-col KPI layout.** Replaces the
+  4-flat-card strip that wrapped labels on tablets. Left column: 2
+  context KPIs (competitors / total insights). Right column: Recharts
+  donut segmented by insight type (`market_gap` / `overlap` / `vault_echo`)
+  with center total and side legend.
+
+### Added — Workflow shortcuts
+
+- **Project-detail "Ask agent" quick-recap button.** Now creates a
+  fresh agent session with a randomly-picked recent model + a
+  structured seed prompt (FR / EN / ES, picks up the dashboard locale
+  automatically). The seed includes project metadata, 90-day Claude/
+  Codex usage, competitors, README excerpt; asks for a synthetic
+  recap, prioritised next 3 actions, market analysis, technical audit,
+  honest verdict.
+- **Settings — Presence sub-page extracted.** The 7 presence
+  configuration sections (scheduler, drafter, persona refresh,
+  OpenRouter, Reddit, X read, X write) now live under
+  `/settings?tab=presence` with a hero status strip + thematic groups
+  (Automatisation / Apprentissage / Connexions). Legacy
+  `/presence?tab=settings` redirects.
+- **Mobile quick-bar in app header** (< 640 px viewports): mascot +
+  Claude/Codex 5 h gauges. Tap → `/usage`. Subscribes to the existing
+  quotaSignal so no extra fetch.
+- **`Section` component gains `actionWide` prop** for sections with
+  wide Segmented actions (Heatmap, VS comparator) that need to stack
+  on mobile. Narrow single-button actions (Sync now / Rescan all)
+  keep inline behavior.
+
 ### Added — Remote access via Tailscale (allow-listed hosts)
 
 The dashboard still binds `127.0.0.1` only, but `auth.ts` now accepts
@@ -163,6 +271,70 @@ maxResults capping, custom handle overrides).
 12 unit tests added in `presenceDrafter.test.ts` covering
 `extractJsonArray()` edge cases (fenced, bare, commentary-wrapped,
 malformed, object-shaped, empty, over-emit, multi-block input).
+
+### Performance — drop external shell dependencies
+
+- **ccusage / @ccusage/codex pinned as runtime deps** (18.0.11) and
+  resolved from local `node_modules/.bin` first, via
+  `VIBECODEDASH_PKG_ROOT` seeded by the CLI wrapper, cwd, or the
+  wrapper's own path. Falls back to `npx --yes ccusage@VERSION` only
+  when not installed. ~3 s → <100 ms cold-start improvement on every
+  invocation, no more network round-trip on first call after `npx`
+  cache clear.
+- **JSONL parsers — pure JS walker.** Replaces the
+  `find -exec stat | awk | sort | head` shell pipeline with
+  `listRecentJsonlFiles` (`fs/promises` recursive walker) in
+  `jsonlShared.ts`. Same depth/mtime/maxFiles filters, but no shell,
+  cross-platform, exit-code paths can't silently drop files. Tests
+  cover the filters in `jsonlShared.test.ts`.
+- **Settings hot-reload in jobs.** Scheduler ticks (project rescan,
+  GitHub sync, Obsidian reindex) and the Obsidian watcher debounced
+  reindex now call `loadSettings()` on every fire instead of reusing
+  the boot snapshot. Editing `~/.config/vibecode-dash/settings.json`
+  takes effect on the next interval — no restart needed.
+
+### Security
+
+- **Strict CSP + Referrer-Policy + X-Content-Type-Options** on every
+  response (`default-src 'self'`, no inline script, restricted
+  `connect-src` to localhost). Belt for the embedded agent UI which
+  renders model markdown.
+- **Markdown post-parse sanitizer.** Allowlist tags + per-tag attributes,
+  drops dangerous nodes with their content (`script`, `iframe`,
+  `object`, `embed`, `form`, `link`, `meta`, `base`, `style`, `math`,
+  `svg`, `canvas`). Defends agent + presence views from prompt-driven
+  HTML injection.
+- **README asset endpoint hardened against symlinks.**
+  `/api/projects/:id/asset` now `realpath()`s the resolved file, the
+  project root, and every allowed root before the containment check,
+  so a symlink like `docs/x.png -> /etc/passwd` cannot escape. `.svg`
+  dropped from the asset MIME table — SVG can carry inline scripts.
+- **Cross-platform path containment.** New `src/server/lib/pathGuards.ts`
+  with an `isSubPath` based on `path.relative` (POSIX `startsWith` was
+  fragile and tricked by sibling prefixes like `/tmp/root` vs
+  `/tmp/root-sibling`). Replaces 4 local copies in `agent.ts`,
+  `projects.ts`, `obsidianScanner.ts`, `jsonlShared.ts` + adds unit
+  tests.
+
+### Fixed
+
+- **`Section` flex-wrap title squeeze on mobile.** When an action had
+  `max-w-full overflow-x-auto`, the browser clamped its flex-basis to
+  the container width, defeating `flex-wrap` — the action took ~100 %
+  of the row and `min-w-0` let the title squeeze to 0. Fixed via the
+  new `actionWide` opt-in (CSS-driven stack at < 640 px).
+- **Mobile drawer overlay + slide-in panel.** Classes were referenced
+  but never defined — the drawer relied on default block layout.
+  Proper CSS added (fixed inset-0 backdrop-blur, slide-in panel with
+  86vw / 320 px clamp, z-index ordering).
+
+### Changed
+
+- **Project list rows uniform card height.** Split into identity (left)
+  + metrics (right) zones. Stack-on-mobile so every row gets exactly
+  2 visual lines regardless of whether `git_branch` is set.
+- **Sidebar breakpoint lowered md → sm** so the tamagochi + QUOTAS stay
+  visible from 640 px instead of 768 px.
 
 ## [0.2.0] — 2026-04-25
 
@@ -414,6 +586,8 @@ First public release. End-to-end functional, ~60 API endpoints, single-user / 12
 - No Tauri packaging yet (planned for v1.1).
 - No embeddings layer; vault retrieval is FTS5-only (planned for v1.2).
 
-[Unreleased]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lacausecrypto/vibecode-dash/releases/tag/v0.1.0
