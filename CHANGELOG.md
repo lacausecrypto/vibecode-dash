@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-04-30
+
+Patch release: drop the unreliable X "Auto-post" button on Presence
+draft cards in favour of the existing Assist flow that already worked.
+
+### Changed
+
+- **Presence — drop X Auto-post, promote Assist to primary.** The
+  OAuth 1.0a-driven Auto-post path on X drafts was unreliable in
+  practice: every click round-tripped through
+  `/api/presence/publish-now` → `presencePublish` worker → `xPostTweet`,
+  and any failure surfaced as an opaque `skipped: rate_cap / cooldown
+  / failed: …` toast that didn't help the user act. With OAuth 1.0a
+  setup itself a multi-step manual process in the X developer portal,
+  the win/effort ratio wasn't there.
+
+  The dashboard already has a friction-light alternative on the same
+  card — the **Assist** button (formerly secondary `tone="ghost"`):
+  copies the draft body to the clipboard, opens
+  `x.com/intent/tweet?text=…` with the body pre-filled in a new tab,
+  then prompts the user for the resulting tweet URL after a 600 ms
+  delay so the engagement poller picks up the post id. Same flow
+  Reddit already uses (modulo Reddit's lack of an intent equivalent).
+
+  Promoted Assist to `tone="primary"` since it's the single publish
+  affordance on X cards now. Removed `handleAutoPublish` (~70 lines)
+  + the `onAutoPublish` prop from DraftCard / FeedView / parent
+  call-site (4 sites total).
+
+  **Server-side intentionally untouched** in this commit:
+  `/api/presence/publish-now` + the `presencePublish` worker +
+  `xPostTweet` wrapper + the OAuth 1.0a write-creds form in Settings →
+  Presence remain in place. Nothing on the client triggers them
+  anymore so they're inert; cleanup deferred until we're sure no
+  headless / scheduled paths still rely on them.
+
 ## [0.3.2] — 2026-04-30
 
 Patch release: three targeted bug fixes — Radar promote was silently
@@ -632,7 +668,8 @@ First public release. End-to-end functional, ~60 API endpoints, single-user / 12
 - No Tauri packaging yet (planned for v1.1).
 - No embeddings layer; vault retrieval is FTS5-only (planned for v1.2).
 
-[Unreleased]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.2.0...v0.3.0
