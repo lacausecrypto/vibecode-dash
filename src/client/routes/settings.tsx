@@ -1085,7 +1085,7 @@ function AliasEditor({
         entries.map(([key, value]) => (
           <div
             key={key}
-            className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto] items-center gap-2"
+            className="flex flex-col gap-1 sm:grid sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto] sm:items-center sm:gap-2"
           >
             <input
               defaultValue={key}
@@ -1093,7 +1093,7 @@ function AliasEditor({
               placeholder={t('settings.aliases.canonicalPlaceholder')}
               className="text-[13px]"
             />
-            <span aria-hidden="true" className="text-[var(--text-faint)]">
+            <span aria-hidden="true" className="hidden text-[var(--text-faint)] sm:inline">
               →
             </span>
             <input

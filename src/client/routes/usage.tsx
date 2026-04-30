@@ -1121,18 +1121,6 @@ export default function UsageRoute() {
           <h2 className="section-title">{t('usage.title')}</h2>
           <div className="section-meta">{t('usage.headerMeta')}</div>
         </div>
-        {/* Page-level range filter: drives the chart + Claude/Codex provider
-            cards + MetricCards below. EconomyCard and ProjectsUsageLLM keep
-            their own all-time / period selectors on purpose. */}
-        <Segmented<TimeRange>
-          value={range}
-          options={[
-            { value: '30d', label: t('common.daysAgo', { n: 30 }) },
-            { value: '90d', label: t('common.daysAgo', { n: 90 }) },
-            { value: 'all', label: t('common.allTime') },
-          ]}
-          onChange={setRange}
-        />
       </div>
 
       {error ? (
@@ -1155,6 +1143,27 @@ export default function UsageRoute() {
       ) : null}
 
       <ProjectsUsageLLM />
+
+      {/* Scope band: pilots the cards row + Heatmap usage + Analytics
+          below. Placed HERE on purpose — the EconomyCard (always all-time
+          cash basis) and the ProjectsUsageLLM (own internal period) sit
+          ABOVE it so the visual separation matches the data scope: stuff
+          above this band ignores the toggle, stuff below respects it. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2">
+        <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+          {t('usage.scopeBand.label')}
+        </span>
+        <Segmented<TimeRange>
+          value={range}
+          options={[
+            { value: '30d', label: t('common.daysAgo', { n: 30 }) },
+            { value: '90d', label: t('common.daysAgo', { n: 90 }) },
+            { value: 'all', label: t('common.allTime') },
+          ]}
+          onChange={setRange}
+        />
+        <span className="text-[10.5px] text-[var(--text-faint)]">{t('usage.scopeBand.hint')}</span>
+      </div>
 
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-4">
         <ProviderSummaryCard
@@ -1602,7 +1611,9 @@ function ProviderSummaryCard({
   return (
     <div className={`rounded-[var(--radius-lg)] border ${accent.border} bg-[var(--surface-1)] p-4`}>
       <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">{title}</div>
-      <div className={`mt-1 text-[26px] font-semibold tracking-tight num ${accent.value}`}>
+      <div
+        className={`mt-1 text-[22px] font-semibold tracking-tight num sm:text-[26px] ${accent.value}`}
+      >
         {numberLabel(selectedTokens)}
       </div>
       <div className="mt-0.5 text-[12px] text-[var(--text-dim)]">{providerTokenTitle(lens)}</div>
@@ -1633,7 +1644,7 @@ function MetricCard({
     <div className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-1)] p-4">
       <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">{title}</div>
       <div
-        className={`mt-1 text-[26px] font-semibold tracking-tight num ${valueTone || 'text-[#30d158]'}`}
+        className={`mt-1 text-[22px] font-semibold tracking-tight num sm:text-[26px] ${valueTone || 'text-[#30d158]'}`}
       >
         {value}
       </div>
@@ -1732,32 +1743,29 @@ function EconomyCard({
       : 0;
 
   return (
-    <div className="rounded-[var(--radius-lg)] border border-[rgba(48,209,88,0.28)] bg-[rgba(48,209,88,0.05)] p-4">
-      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <div>
-          <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+    <div className="rounded-[var(--radius-lg)] border border-[rgba(48,209,88,0.28)] bg-[rgba(48,209,88,0.05)] px-3 py-2.5">
+      {/* Header row: label + headline + ratio inline. Right-side meta
+          (since/days) collapses below the headline on narrow screens via
+          flex-wrap, sits to the right on lg+. */}
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
             {t('usage.economy.headline')}
-          </div>
-          <div className="mt-1 flex items-baseline gap-2">
-            <span className="num text-[32px] font-semibold tracking-tight text-[#30d158]">
-              {totalSavingsEur >= 0 ? '+' : '−'}
-              {euroLabel(Math.abs(totalSavingsEur))}
-            </span>
-            <span className="text-[12px] text-[var(--text-dim)]">
-              {t('usage.economy.savedSuffix')}
-            </span>
-          </div>
-          <div className="mt-0.5 text-[12px] text-[var(--text-mute)]">
-            {t('usage.economy.summary', {
-              paid: euroLabel(totalPaidEur),
-              metered: euroLabel(totalMeteredEur),
-              ratio: ratio.toFixed(1),
-            })}
-          </div>
+          </span>
+          <span className="num text-[22px] font-semibold tracking-tight text-[#30d158]">
+            {totalSavingsEur >= 0 ? '+' : '−'}
+            {euroLabel(Math.abs(totalSavingsEur))}
+          </span>
+          <span className="text-[11px] text-[var(--text-dim)]">
+            {t('usage.economy.savedSuffix')}
+          </span>
+          {totalPaidEur > 0 ? (
+            <span className="num text-[11px] text-[#30d158]">· ×{ratio.toFixed(1)}</span>
+          ) : null}
         </div>
-        <div className="text-right text-[11px] text-[var(--text-dim)]">
+        <div className="text-[11px] text-[var(--text-mute)]">
           {t('usage.economy.sinceSingle', { date: firstLabel })}
-          <br />
+          {' · '}
           {t('usage.economy.historyDays', { n: spanDays })}
           {meteredDays > 0 && meteredDays !== spanDays ? (
             <>
@@ -1768,7 +1776,18 @@ function EconomyCard({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+      {/* Sub-headline: "payé X au lieu de Y". Same content as before, but
+          de-emphasised — the big number above already is the takeaway. */}
+      <div className="mt-1 text-[11px] text-[var(--text-mute)]">
+        {t('usage.economy.summary', {
+          paid: euroLabel(totalPaidEur),
+          metered: euroLabel(totalMeteredEur),
+          ratio: ratio.toFixed(1),
+        })}
+      </div>
+
+      {/* Per-provider rows: compact one-liners. Stack on mobile, side-by-side from md. */}
+      <div className="mt-2 grid grid-cols-1 gap-1.5 md:grid-cols-2">
         <EconomyRow
           provider="Claude"
           plan={subs.claude.plan}
@@ -1787,7 +1806,7 @@ function EconomyCard({
         />
       </div>
 
-      <div className="mt-3 text-[11px] text-[var(--text-faint)]">
+      <div className="mt-2 text-[10.5px] text-[var(--text-faint)]">
         {t('usage.economy.basedOnRate', { rate: subs.usdToEur.toFixed(2) })}{' '}
         <a href="/settings" className="text-[var(--accent)]">
           {t('usage.economy.settingsLink')}
@@ -1818,30 +1837,35 @@ function EconomyRow({
   const savingsTone = savingsEur >= 0 ? 'text-[#30d158]' : 'text-[#ff453a]';
   const ratio = paidEur > 0 ? meteredEur / paidEur : 0;
   return (
-    <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2">
+    <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-2.5 py-1.5">
+      {/* Provider · plan on the left, savings on the right. Numbers row
+          below — flow-wraps on narrow widths so nothing overflows. */}
       <div className="flex items-baseline justify-between gap-2">
-        <div>
-          <div className={`text-[13px] font-medium ${accent}`}>{provider}</div>
-          <div className="text-[11px] text-[var(--text-dim)]">{plan}</div>
+        <div className="flex items-baseline gap-1.5 min-w-0">
+          <span className={`text-[12.5px] font-medium ${accent}`}>{provider}</span>
+          <span className="truncate text-[10.5px] text-[var(--text-dim)]">{plan}</span>
         </div>
-        <div className={`num text-[18px] font-semibold ${savingsTone}`}>
+        <span className={`num text-[15px] font-semibold ${savingsTone}`}>
           {savingsEur >= 0 ? '+' : '−'}
           {euroLabel(Math.abs(savingsEur))}
-        </div>
+        </span>
       </div>
-      <div className="mt-2 flex flex-col gap-1 text-[12px]">
-        <div className="flex items-center justify-between">
-          <span className="text-[var(--text-dim)]">{t('usage.economyRow.paidCumul')}</span>
-          <span className="num text-[var(--text-mute)]">{euroLabel(paidEur)}</span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-[var(--text-dim)]">{t('usage.economyRow.ifPayg')}</span>
-          <span className="num text-[var(--text-mute)]">{euroLabel(meteredEur)}</span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-[var(--text-dim)]">{t('usage.economyRow.ratio')}</span>
-          <span className={`num ${savingsTone}`}>×{ratio.toFixed(1)}</span>
-        </div>
+      <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0 text-[11px] text-[var(--text-mute)]">
+        <span className="num">
+          <span className="text-[var(--text-dim)]">{t('usage.economyRow.paidCumul')} </span>
+          {euroLabel(paidEur)}
+        </span>
+        <span aria-hidden className="text-[var(--text-faint)]">
+          ·
+        </span>
+        <span className="num">
+          <span className="text-[var(--text-dim)]">{t('usage.economyRow.ifPayg')} </span>
+          {euroLabel(meteredEur)}
+        </span>
+        <span aria-hidden className="text-[var(--text-faint)]">
+          ·
+        </span>
+        <span className={`num ${savingsTone}`}>×{ratio.toFixed(1)}</span>
       </div>
     </div>
   );

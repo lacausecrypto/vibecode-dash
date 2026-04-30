@@ -1539,7 +1539,7 @@ export default function AgentRoute() {
               <button
                 type="button"
                 onClick={() => setLeftCollapsed(false)}
-                className="text-[13px] text-[var(--text-dim)] hover:text-[var(--text)]"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-2)] text-[14px] leading-none text-[var(--text-mute)] hover:border-[var(--border-strong)] hover:text-[var(--text)]"
                 aria-label={t('agent.sessions.expandAria')}
                 title={t('agent.sessions.expandTitle')}
               >
@@ -1551,12 +1551,12 @@ export default function AgentRoute() {
                   {t('agent.sessions.heading')} ·{' '}
                   <span className="num text-[var(--text-faint)]">{sessions.length}</span>
                 </span>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1.5">
                   <details className="relative">
-                    <summary className="cursor-pointer list-none rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-2)] px-1.5 text-[13px] leading-5 text-[var(--text-mute)] hover:text-[var(--text)]">
+                    <summary className="inline-flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-2)] text-[15px] leading-none text-[var(--text-mute)] hover:border-[var(--border-strong)] hover:text-[var(--text)]">
                       +
                     </summary>
-                    <div className="absolute right-0 z-10 mt-1 flex w-[220px] flex-col gap-2 rounded-[var(--radius)] border border-[var(--border-strong)] bg-[rgba(11,13,17,0.96)] p-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur">
+                    <div className="absolute right-0 z-10 mt-1 flex w-[220px] max-w-[calc(100vw-2rem)] flex-col gap-2 rounded-[var(--radius)] border border-[var(--border-strong)] bg-[rgba(11,13,17,0.96)] p-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur">
                       <Segmented
                         value={newProvider}
                         options={[
@@ -1622,7 +1622,7 @@ export default function AgentRoute() {
                   <button
                     type="button"
                     onClick={() => setLeftCollapsed(true)}
-                    className="text-[13px] text-[var(--text-dim)] hover:text-[var(--text)]"
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-2)] text-[14px] leading-none text-[var(--text-mute)] hover:border-[var(--border-strong)] hover:text-[var(--text)]"
                     aria-label={t('agent.sessions.collapseAria')}
                     title={t('agent.sessions.collapseAria')}
                   >
@@ -1694,7 +1694,7 @@ export default function AgentRoute() {
         {/* ============== CENTER — Conversation (hero) ============== */}
         <section className="agent-pane">
           {/* Toolbar */}
-          <div className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-2">
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] px-4 py-2">
             <Segmented
               value={mode}
               options={getAgentModeList(locale).map((m) => ({
@@ -1712,7 +1712,7 @@ export default function AgentRoute() {
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
                 placeholder={t('agent.toolbar.filterPlaceholder')}
-                className="w-[140px] !py-1 !text-[12px]"
+                className="w-28 !py-1 !text-[12px] sm:w-[140px]"
               />
 
               <details className="relative">
@@ -1722,7 +1722,7 @@ export default function AgentRoute() {
                 >
                   ⋯
                 </summary>
-                <div className="absolute right-0 z-10 mt-1 flex w-[280px] flex-col gap-0.5 rounded-[var(--radius)] border border-[var(--border-strong)] bg-[rgba(11,13,17,0.96)] p-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur">
+                <div className="absolute right-0 z-10 mt-1 flex w-[280px] max-w-[calc(100vw-2rem)] flex-col gap-0.5 rounded-[var(--radius)] border border-[var(--border-strong)] bg-[rgba(11,13,17,0.96)] p-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur">
                   <button
                     type="button"
                     onClick={() => {

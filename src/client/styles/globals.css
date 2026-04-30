@@ -471,6 +471,45 @@ kbd {
   .agent-drawer-panel {
     width: 100vw;
   }
+  /* Mobile sessions pane: lay out as a compact horizontal strip rather
+     than a tall vertical column. With grid-rows auto-sizing and the grid
+     row stretching to its tallest sibling, an empty vertical sessions
+     pane was floating avatar tiles in a sea of whitespace. The strip
+     keeps the pane to ~one row and scrolls sideways. Targets the FIRST
+     .agent-pane (the sessions <aside>) — the conversation <section>
+     uses the same class but stays untouched. */
+  .agent-shell[data-sessions="collapsed"] aside.agent-pane {
+    /* Header (~32 px) + 32 px avatar + padding. Tight enough to keep the
+       conversation breathing, tall enough that 32 px tiles never clip. */
+    max-height: 88px;
+  }
+  .agent-shell[data-sessions="collapsed"] aside.agent-pane .agent-sessions-scroll {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 6px 8px;
+    align-items: center;
+  }
+  /* Tighten the header bar on mobile-collapsed so the strip below has
+     room to render the 32 px avatar tiles without clipping (default
+     padding ate ~16 px of vertical budget). The expand button stays
+     reachable; just less padded. */
+  .agent-shell[data-sessions="collapsed"] aside.agent-pane > div:first-child {
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+  /* When the sessions pane is OPEN on mobile (full SessionTile rows),
+     allow more height so the tile content stays readable, but still
+     bound it so the conversation pane gets the bulk of the viewport. */
+  .agent-shell[data-sessions="open"] aside.agent-pane {
+    max-height: 220px;
+  }
+  .agent-shell[data-sessions="open"] aside.agent-pane .agent-sessions-scroll {
+    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: auto;
+    align-items: stretch;
+  }
 }
 
 /* ================= Numbers ================= */
@@ -572,17 +611,28 @@ kbd {
 .stat-label {
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   color: var(--text-dim);
   font-weight: 500;
+  /* Allow long single words ("PROJECTS", "COMPETITORS", "OVERLAPS") to
+     break onto a second line in narrow grid cells instead of being
+     clipped by the parent .stat's overflow:hidden. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.2;
 }
 
 .stat-value {
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--text);
   font-variant-numeric: tabular-nums;
+}
+@media (min-width: 640px) {
+  .stat-value {
+    font-size: 26px;
+  }
 }
 
 .stat-hint {

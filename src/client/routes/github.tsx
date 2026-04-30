@@ -1058,7 +1058,7 @@ export default function GithubRoute() {
             value={
               topTrafficRepo ? (
                 <span
-                  className="block max-w-full truncate text-[26px] leading-tight"
+                  className="block max-w-full truncate text-[20px] leading-tight sm:text-[26px]"
                   title={topTrafficRepo.repo}
                 >
                   {topTrafficRepo.repo}
