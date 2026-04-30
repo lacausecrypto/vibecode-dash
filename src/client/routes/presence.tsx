@@ -769,82 +769,15 @@ export default function PresenceRoute() {
     handleMarkPostedRef.current = handleMarkPosted;
   }, [handleMarkPosted]);
 
-  /**
-   * Auto-publish path: transitions the draft to `approved` (which the
-   * presencePublish worker reads as "user greenlit, please post via API")
-   * and immediately fires /publish-now so the user gets feedback within
-   * a second instead of waiting up to 60 s for the next scheduler tick.
-   *
-   * Only meaningful for X drafts — Reddit drafts in `approved` get logged
-   * as `reddit_handed_off` by the worker (no API path, deeplink-only).
-   * The button is exposed on X cards specifically so the UX stays
-   * unambiguous: this is the "let the dashboard post for you" path.
-   *
-   * Failure surfaces verbatim from the worker outcome: missing OAuth keys,
-   * rate cap, cooldown, duplicate, X 4xx — each is a discrete `decision`
-   * row in presence_publish_log the user can read in Settings → Logs.
-   */
-  const handleAutoPublish = useCallback(
-    async (draft: DraftRow) => {
-      try {
-        // 1. Move to `approved`. transitionDraft is idempotent at the
-        //    SQL level; calling it on an already-approved draft is a no-op
-        //    on status (decided_at COALESCE-protected).
-        await apiPost(`/api/presence/drafts/${draft.id}/transition`, { status: 'approved' });
-
-        // 2. Trigger one immediate worker pass instead of waiting for the
-        //    60 s tick. The worker walks ALL approved drafts, but only
-        //    this draft is fresh — pre-existing approved drafts that hit
-        //    the rails (cap, window, cooldown) get re-evaluated too which
-        //    is the right behavior (their gates may have lifted).
-        const outcome = await apiPost<{
-          considered: number;
-          published: number;
-          reddit_handed_off: number;
-          skipped: number;
-          failed: number;
-          decisions: Array<{
-            draft_id: string;
-            decision: string;
-            reason: string | null;
-          }>;
-        }>('/api/presence/publish-now', {});
-
-        // 3. Find this draft's specific decision in the outcome so the
-        //    toast matches what the worker actually did to THIS card.
-        //    (Other approved drafts processed in the same pass aren't
-        //    relevant to the user who clicked Auto-post on one card.)
-        const mine = outcome.decisions.find((d) => d.draft_id === draft.id);
-        if (!mine) {
-          showToast(
-            t('presence.feed.autoPublish.queued', {
-              platform: draft.platform === 'x' ? 'X' : 'Reddit',
-            }),
-          );
-        } else if (mine.decision === 'published') {
-          showToast(t('presence.feed.autoPublish.published'));
-        } else if (mine.decision === 'reddit_handed_off') {
-          showToast(t('presence.feed.autoPublish.redditHandedOff'));
-        } else if (mine.decision === 'failed') {
-          setError(`${t('presence.feed.autoPublish.failed')}: ${mine.reason ?? '(no detail)'}`);
-        } else {
-          // skipped_window / skipped_rate_cap / skipped_cooldown /
-          // skipped_duplicate / dry_run — surface the reason verbatim.
-          showToast(
-            t('presence.feed.autoPublish.skipped', {
-              decision: mine.decision,
-              reason: mine.reason ?? '',
-            }),
-          );
-        }
-
-        await loadFeed();
-      } catch (e) {
-        setError(formatError(e));
-      }
-    },
-    [loadFeed, showToast, t],
-  );
+  // Removed: handleAutoPublish + the X-only Auto-post button.
+  // The OAuth 1.0a `/publish-now` path was unreliable in practice and
+  // confused the UX. The Assist flow (handleAssistedPost above) covers
+  // the same intent without API tokens: copy body → open
+  // x.com/intent/tweet pre-filled → prompt URL on return → mark posted
+  // with the engagement-poller-friendly id parsed out of the URL.
+  // The /api/presence/publish-now endpoint and the presencePublish
+  // worker remain server-side for now (no harm — no client triggers
+  // them); cleanup deferred until we're sure there's no headless use.
 
   const handleSaveDraft = useCallback(
     async (id: string, draft_body: string) => {
@@ -1240,7 +1173,6 @@ export default function PresenceRoute() {
           onBulkApplyByThreshold={(ids, status) => void handleBulkApplyByThreshold(ids, status)}
           onMarkPosted={handleMarkPosted}
           onAssistedPost={handleAssistedPost}
-          onAutoPublish={handleAutoPublish}
           filterMinScore={filterMinScore}
           filterMaxScore={filterMaxScore}
           filterSourceId={filterSourceId}
@@ -1315,7 +1247,6 @@ function FeedView({
   onBulkApplyByThreshold,
   onMarkPosted,
   onAssistedPost,
-  onAutoPublish,
   onTranslate,
   onTranslationOutcome,
   filterMinScore,
@@ -1347,7 +1278,6 @@ function FeedView({
   onBulkApplyByThreshold: (ids: string[], status: DraftStatus) => void;
   onMarkPosted: (draft: DraftRow) => void;
   onAssistedPost: (draft: DraftRow) => void;
-  onAutoPublish: (draft: DraftRow) => void;
   filterMinScore: number;
   filterMaxScore: number;
   filterSourceId: string;
@@ -1466,7 +1396,6 @@ function FeedView({
             onTransition={onTransition}
             onMarkPosted={onMarkPosted}
             onAssistedPost={onAssistedPost}
-            onAutoPublish={onAutoPublish}
             onSave={onSave}
             onTranslate={onTranslate}
             onTranslationOutcome={onTranslationOutcome}
@@ -1699,7 +1628,6 @@ function DraftCard({
   onTransition,
   onMarkPosted,
   onAssistedPost,
-  onAutoPublish,
   onSave,
   onTranslate,
   onTranslationOutcome,
@@ -1719,7 +1647,6 @@ function DraftCard({
   ) => void;
   onMarkPosted: (draft: DraftRow) => void;
   onAssistedPost: (draft: DraftRow) => void;
-  onAutoPublish: (draft: DraftRow) => void;
   onSave: (id: string, body: string) => Promise<void>;
   onTranslate: (id: string, lang: 'fr' | 'en' | 'es') => Promise<string | null>;
   onTranslationOutcome: (
@@ -2000,12 +1927,15 @@ function DraftCard({
                 ? t('presence.feed.actions.imageRegen')
                 : t('presence.feed.actions.image')}
             </Button>
-            {/* Assist mode: copy body + open thread/intent in new tab,
-                then prompt URL on return. Reddit-friendly fallback when
-                /prefs/apps OAuth isn't available, also useful for X
-                without OAuth 1.0a setup. Always rendered. */}
+            {/* Assist mode — the primary post path for both platforms now
+                that the API-driven X auto-publish has been removed: copy
+                body to clipboard, open intent/thread URL with text
+                pre-filled, prompt for the resulting URL after 600 ms so
+                the engagement poller has the post id. Promoted to
+                tone="primary" since it's the single "publish this"
+                button on the card. */}
             <Button
-              tone="ghost"
+              tone="primary"
               onClick={() => onAssistedPost(draft)}
               className="!py-1 !text-[11px]"
               title={t('presence.feed.actions.assistTitle', {
@@ -2014,23 +1944,6 @@ function DraftCard({
             >
               {t('presence.feed.actions.assist')}
             </Button>
-            {/* Auto-publish (X only). Transitions the draft to `approved`
-                and immediately fires /publish-now. The presencePublish
-                worker calls xPostTweet() via the OAuth 1.0a creds the
-                user already saved in Settings. Reddit drafts don't get
-                this button because Reddit has no auth-free posting API
-                — the deeplink path via "Ouvrir & copier" is the only
-                ToS-compliant route there. */}
-            {draft.platform === 'x' ? (
-              <Button
-                tone="primary"
-                onClick={() => onAutoPublish(draft)}
-                className="!py-1 !text-[11px]"
-                title={t('presence.feed.actions.autoPublishTitle')}
-              >
-                {t('presence.feed.actions.autoPublish')}
-              </Button>
-            ) : null}
             <Button
               tone="ghost"
               onClick={() => onMarkPosted(draft)}
