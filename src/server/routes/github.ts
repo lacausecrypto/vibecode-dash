@@ -327,14 +327,19 @@ export function registerGithubRoutes(app: Hono): void {
     )
       .toISOString()
       .slice(0, 10);
+    const todayUtc = now.toISOString().slice(0, 10);
+    // Filter out future-dated rows. The npm sync writer trusts upstream
+    // dates verbatim and the registry occasionally returns a row dated
+    // T+1 (timezone seam in their pipeline) — those rows pollute cumul
+    // charts with a flat-zero column past today.
     const rows = db
-      .query<{ date: string; repo: string; downloads: number }, [string]>(
+      .query<{ date: string; repo: string; downloads: number }, [string, string]>(
         `SELECT date, repo_name AS repo, downloads
            FROM npm_downloads_daily
-          WHERE date >= ?
+          WHERE date >= ? AND date <= ?
           ORDER BY date DESC, downloads DESC`,
       )
-      .all(cutoff);
+      .all(cutoff, todayUtc);
     return c.json({ rows });
   });
 
@@ -481,7 +486,13 @@ export function registerGithubRoutes(app: Hono): void {
     )
       .toISOString()
       .slice(0, 10);
+    const todayUtc = now.toISOString().slice(0, 10);
 
+    // `date <= todayUtc` filter: GitHub Traffic API occasionally returns
+    // a row for T+1 (timezone seam in their pipeline) with all-zero
+    // counts. The sync writer trusts upstream dates verbatim — without
+    // this filter the cumul charts get a flat-zero column past today,
+    // which reads as a stale chart even though the math is correct.
     const rows = db
       .query<
         {
@@ -492,7 +503,7 @@ export function registerGithubRoutes(app: Hono): void {
           clonesCount: number;
           clonesUniques: number;
         },
-        [string]
+        [string, string]
       >(
         `SELECT
            repo,
@@ -502,10 +513,10 @@ export function registerGithubRoutes(app: Hono): void {
            clones_count AS clonesCount,
            clones_uniques AS clonesUniques
          FROM github_repo_traffic_daily
-         WHERE date >= ?
+         WHERE date >= ? AND date <= ?
          ORDER BY repo ASC, date ASC`,
       )
-      .all(cutoff)
+      .all(cutoff, todayUtc)
       .map((row) => ({
         ...row,
         viewsCount: Number(row.viewsCount || 0),
