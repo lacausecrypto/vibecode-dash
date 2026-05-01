@@ -14,7 +14,7 @@ import { Heatmap } from '../components/Heatmap';
 import { HeatmapStackedBars } from '../components/HeatmapStackedBars';
 import { Card, ErrorBanner, Section, Segmented, Stat } from '../components/ui';
 import { apiGet } from '../lib/api';
-import type { GroupBy, StackedDailyRow } from '../lib/cumulStacks';
+import { type GroupBy, type StackedDailyRow, bucketOf } from '../lib/cumulStacks';
 import { type Locale, dateLocale, numberLocale, useTranslation } from '../lib/i18n';
 
 type Project = {
@@ -1555,6 +1555,14 @@ export default function OverviewRoute() {
                   : HEATMAP_METRIC_CONFIG[heatmapMetric].palette === 'cyan'
                     ? 'cyan'
                     : 'github';
+              // Pending bucket cue: GitHub Traffic API (views/clones) and
+              // npm registry (downloads) lag the current day by 6-48 h.
+              // Mark today's bucket at reduced opacity + tooltip hint so
+              // the user understands why the column hasn't grown yet,
+              // instead of guessing the dashboard is stale.
+              const isPendingMetric =
+                heatmapMetric === 'views' || heatmapMetric === 'clones' || heatmapMetric === 'npm';
+              const pendingBucket = isPendingMetric ? bucketOf(todayIso, groupBy) : null;
               return (
                 <HeatmapStackedBars
                   daily={stacked}
@@ -1563,6 +1571,7 @@ export default function OverviewRoute() {
                   groupBy={groupBy}
                   cumulative
                   scheme={palette}
+                  pendingBucket={pendingBucket}
                   totalLabel={unifiedHeatmap.unit}
                   height={260}
                 />

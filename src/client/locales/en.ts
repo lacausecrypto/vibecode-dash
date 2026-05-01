@@ -81,6 +81,10 @@ export const DICT_EN = {
     weekdaySat: 'Sat',
   },
 
+  heatmapStacked: {
+    pendingHint: 'Partial data · GitHub Traffic / npm API publishes with a 6-48 h delay',
+  },
+
   nav: {
     overview: 'Overview',
     projects: 'Projects',

@@ -81,6 +81,10 @@ export const DICT_FR = {
     weekdaySat: 'Sam',
   },
 
+  heatmapStacked: {
+    pendingHint: 'Données partielles · l’API GitHub Traffic / npm publie avec un délai de 6-48 h',
+  },
+
   nav: {
     overview: 'Overview',
     projects: 'Projects',

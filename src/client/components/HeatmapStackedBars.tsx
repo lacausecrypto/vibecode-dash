@@ -1,5 +1,14 @@
 import { useMemo } from 'react';
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import {
   type GroupBy,
   type RepoColorScheme,
@@ -58,6 +67,15 @@ type HeatmapStackedBarsProps = {
    * EUR should render as "12,3 k €" / "152 €", not "12300" / "152".
    */
   valueFormatter?: (value: number) => string;
+  /**
+   * Bucket key (already bucketed by `bucketOf(date, groupBy)` upstream)
+   * to mark as "data still pending upstream". Renders the matching
+   * column at reduced opacity and surfaces a "données partielles" hint
+   * in the tooltip. Used by the Overview heatmap for views/clones/npm
+   * where the upstream APIs (GitHub Traffic, npm registry) lag the
+   * current day by 6-48 h.
+   */
+  pendingBucket?: string | null;
   totalLabel?: string;
   /** When provided, renders in the header instead of the auto-summed total. */
   totalValue?: number;
@@ -148,6 +166,7 @@ export function HeatmapStackedBars({
   scheme = 'github',
   colorMap,
   valueFormatter,
+  pendingBucket,
   totalLabel,
   totalValue,
   height = 220,
@@ -321,6 +340,24 @@ export function HeatmapStackedBars({
                     <div style={{ marginBottom: 6, fontWeight: 600 }}>
                       {formatValue(total)} {effectiveTotalLabel}
                     </div>
+                    {/* Pending hint — surfaces when the hovered bucket
+                        is the one the caller flagged as having
+                        upstream-pending data (today on views/clones/npm).
+                        Tells the user the column will grow once the
+                        upstream API publishes (6-48 h delay), without
+                        making them think the dashboard is stale. */}
+                    {pendingBucket && label === pendingBucket ? (
+                      <div
+                        style={{
+                          marginBottom: 6,
+                          fontSize: 11,
+                          color: '#ffd60a',
+                          opacity: 0.9,
+                        }}
+                      >
+                        ⏳ {t('heatmapStacked.pendingHint')}
+                      </div>
+                    ) : null}
                     {entries.slice(0, 12).map((e) => {
                       const share = total > 0 ? Math.round((e.value / total) * 100) : 0;
                       return (
@@ -381,16 +418,33 @@ export function HeatmapStackedBars({
             />
             {/* One Bar per repo, all sharing the same stackId. Reverse the
                 array so the largest-total repo lands at the bottom of the
-                stack (Recharts draws bars in array order, bottom-up). */}
-            {[...model.repos].reverse().map((repo) => (
-              <Bar
-                key={repo}
-                dataKey={repo}
-                stackId="cumul"
-                fill={colorMap?.[repo] ?? repoColor(repo, scheme)}
-                isAnimationActive={false}
-              />
-            ))}
+                stack (Recharts draws bars in array order, bottom-up).
+                When `pendingBucket` is set, we wrap each Bar's segments
+                in <Cell> so the matching column renders at reduced
+                fillOpacity — visual cue the data isn't final. Without
+                pendingBucket, no Cells = single fill, fastest path. */}
+            {[...model.repos].reverse().map((repo) => {
+              const fill = colorMap?.[repo] ?? repoColor(repo, scheme);
+              return (
+                <Bar
+                  key={repo}
+                  dataKey={repo}
+                  stackId="cumul"
+                  fill={fill}
+                  isAnimationActive={false}
+                >
+                  {pendingBucket
+                    ? model.rows.map((row) => (
+                        <Cell
+                          key={String(row.bucket)}
+                          fill={fill}
+                          fillOpacity={row.bucket === pendingBucket ? 0.4 : 1}
+                        />
+                      ))
+                    : null}
+                </Bar>
+              );
+            })}
           </BarChart>
         </ResponsiveContainer>
       </div>
