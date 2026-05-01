@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-04-30
+
+Patch release: fix the "cumul stacked-bars view doesn't grow" UX
+confusion on the Overview heatmap for views / clones / npm metrics.
+Two complementary fixes — drop forward-dated rows server-side, and
+surface the upstream-lag explicitly in the chart UI.
+
+### Fixed
+
+- **GitHub — drop future-dated rows from `/traffic/timeseries` and
+  `/npm/daily-by-repo`.** GitHub Traffic API occasionally returns a row
+  dated T+1 (UTC) with all-zero counts — a timezone seam in their
+  aggregation pipeline. The npm registry has the same quirk on
+  `/downloads/range`. The sync writer trusted upstream dates verbatim
+  and upserted those rows. Visible side effect: in the cumul
+  stacked-bars view, a flat-zero column past today reading as a stale
+  chart even though `cumul[T+1] = cumul[T] + 0` is mathematically
+  correct. Added `WHERE date <= todayUtc` to both endpoints' SQL
+  queries — anything upstream legitimately publishes for "today" still
+  surfaces, but forward-dated zero rows that exist purely as a side
+  effect of upstream timezone handling stop polluting the chart.
+- **Overview — mark today's bucket as pending on views / clones / npm
+  cumul charts.** GitHub Traffic publishes the current day's counts
+  with a 6-48 h delay; npm registry lags by 1-2 days. Today's column
+  legitimately receives zero new data, so `cumul[today] =
+  cumul[yesterday] + 0` produces a column the same height as
+  yesterday's — looked like the dashboard was stuck. New
+  `pendingBucket` prop on `HeatmapStackedBars`: when set, the matching
+  column renders at `fillOpacity: 0.4` (vs 1 elsewhere) and the
+  tooltip surfaces a yellow `⏳ Données partielles · …` line
+  explaining the upstream delay. The bucket key is pre-bucketed by
+  the caller via `bucketOf(date, groupBy)` so the same prop works at
+  all granularities (day / week / biweekly / month / quarter / year).
+  Overview computes `pendingBucket = bucketOf(todayIso, groupBy)`
+  only when `metric ∈ {views, clones, npm}`; other metrics (contrib /
+  notes / llm-*) have no upstream lag and skip the cue entirely. New
+  i18n key `heatmapStacked.pendingHint` in fr / en / es.
+
 ## [0.3.3] — 2026-04-30
 
 Patch release: drop the unreliable X "Auto-post" button on Presence
@@ -668,7 +706,8 @@ First public release. End-to-end functional, ~60 API endpoints, single-user / 12
 - No Tauri packaging yet (planned for v1.1).
 - No embeddings layer; vault retrieval is FTS5-only (planned for v1.2).
 
-[Unreleased]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/lacausecrypto/vibecode-dash/compare/v0.3.0...v0.3.1
