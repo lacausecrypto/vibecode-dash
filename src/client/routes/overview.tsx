@@ -35,13 +35,21 @@ type HeatmapMetric =
   | 'views'
   | 'clones'
   | 'npm'
+  | 'pypi'
+  | 'cargo'
   | 'llm-total'
   | 'llm-claude'
   | 'llm-codex'
   | 'notes';
 
-type NpmDailyByRepoRow = { date: string; repo: string; downloads: number };
-type NpmDailyByRepoResponse = { rows: NpmDailyByRepoRow[] };
+// All package-registry endpoints share the same shape — npm, pypi,
+// crates.io. Same row type, same response wrapper.
+type PackageDailyByRepoRow = { date: string; repo: string; downloads: number };
+type PackageDailyByRepoResponse = { rows: PackageDailyByRepoRow[] };
+
+// Aliases kept so existing call sites read clearly. Functional twins.
+type NpmDailyByRepoRow = PackageDailyByRepoRow;
+type NpmDailyByRepoResponse = PackageDailyByRepoResponse;
 
 // Granularities exposed on the cumul view. 'all' collapses everything into
 // a single column (one bar = total cumulative on the displayed window).
@@ -562,6 +570,8 @@ const HEATMAP_METRIC_CONFIG: Record<HeatmapMetric, HeatmapMetricConfig> = {
   views: { label: 'Views', palette: 'cyan', unit: 'views' },
   clones: { label: 'Clones', palette: 'amber', unit: 'clones' },
   npm: { label: 'NPM', palette: 'amber', unit: 'downloads' },
+  pypi: { label: 'PyPI', palette: 'cyan', unit: 'downloads' },
+  cargo: { label: 'Cargo', palette: 'amber', unit: 'downloads' },
   'llm-total': { label: 'LLM total', palette: 'github', unit: 'tokens' },
   'llm-claude': { label: 'LLM Claude', palette: 'cyan', unit: 'tokens' },
   'llm-codex': { label: 'LLM Codex', palette: 'amber', unit: 'tokens' },
@@ -586,7 +596,13 @@ function metricLabelKey(metric: HeatmapMetric): string {
 // across the user's GH activity, llm-* / notes don't carry a repo field)
 // degrade to a single-color cumul stack.
 function hasPerRepoBreakdown(metric: HeatmapMetric): boolean {
-  return metric === 'views' || metric === 'clones' || metric === 'npm';
+  return (
+    metric === 'views' ||
+    metric === 'clones' ||
+    metric === 'npm' ||
+    metric === 'pypi' ||
+    metric === 'cargo'
+  );
 }
 
 function buildAnnualDates(year: number): string[] {
@@ -730,9 +746,14 @@ export default function OverviewRoute() {
   const [daily, setDaily] = useState<DailyCombinedRow[]>([]);
   const [obsidianActivity, setObsidianActivity] = useState<ObsidianActivityDay[]>([]);
   const [trafficSeries, setTrafficSeries] = useState<TrafficTimeseriesResponse | null>(null);
-  // Per-repo daily npm downloads — feeds the cumul view's per-project
-  // proportional stacking when the metric is `npm`.
+  // Per-repo daily downloads, one state per registry. Each feeds both
+  // the heatmap (when the user picks the matching metric) and the cumul
+  // view's per-project proportional stacking. They live as separate
+  // arrays — not one merged map — because the chart aggregations key on
+  // the active metric and need O(1) access to the right slice.
   const [npmByRepo, setNpmByRepo] = useState<NpmDailyByRepoRow[]>([]);
+  const [pypiByRepo, setPypiByRepo] = useState<PackageDailyByRepoRow[]>([]);
+  const [cargoByRepo, setCargoByRepo] = useState<PackageDailyByRepoRow[]>([]);
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [heatmapMetric, setHeatmapMetric] = useState<HeatmapMetric>('contrib');
@@ -764,6 +785,8 @@ export default function OverviewRoute() {
       apiGet<TrafficTimeseriesResponse>('/api/github/traffic/timeseries?days=365'),
       apiGet<SettingsResponse>('/api/settings'),
       apiGet<NpmDailyByRepoResponse>('/api/github/npm/daily-by-repo?days=365'),
+      apiGet<PackageDailyByRepoResponse>('/api/github/pypi/daily-by-repo?days=365'),
+      apiGet<PackageDailyByRepoResponse>('/api/github/crates/daily-by-repo?days=365'),
     ])
       .then(
         ([
@@ -774,6 +797,8 @@ export default function OverviewRoute() {
           trafficSeriesData,
           settingsData,
           npmByRepoData,
+          pypiByRepoData,
+          cargoByRepoData,
         ]) => {
           if (!mounted) {
             return;
@@ -785,6 +810,8 @@ export default function OverviewRoute() {
           setTrafficSeries(trafficSeriesData);
           setSettings(settingsData);
           setNpmByRepo(npmByRepoData.rows || []);
+          setPypiByRepo(pypiByRepoData.rows || []);
+          setCargoByRepo(cargoByRepoData.rows || []);
         },
       )
       .catch((e) => {
@@ -814,8 +841,10 @@ export default function OverviewRoute() {
           heatmapMetric === 'views' ? Number(row.viewsCount || 0) : Number(row.clonesCount || 0);
         dataByDate.set(row.date, (dataByDate.get(row.date) || 0) + v);
       }
-    } else if (heatmapMetric === 'npm') {
-      for (const row of npmByRepo) {
+    } else if (heatmapMetric === 'npm' || heatmapMetric === 'pypi' || heatmapMetric === 'cargo') {
+      const source =
+        heatmapMetric === 'npm' ? npmByRepo : heatmapMetric === 'pypi' ? pypiByRepo : cargoByRepo;
+      for (const row of source) {
         dataByDate.set(row.date, (dataByDate.get(row.date) || 0) + Number(row.downloads || 0));
       }
     } else if (heatmapMetric === 'notes') {
@@ -844,7 +873,17 @@ export default function OverviewRoute() {
     const config = HEATMAP_METRIC_CONFIG[heatmapMetric];
     const localizedLabel = t(`overview.heatmap.${metricLabelKey(heatmapMetric)}`);
     return { days, total, palette: config.palette, label: localizedLabel, unit: config.unit };
-  }, [heatmap, heatmapMetric, daily, obsidianActivity, trafficSeries, npmByRepo, t]);
+  }, [
+    heatmap,
+    heatmapMetric,
+    daily,
+    obsidianActivity,
+    trafficSeries,
+    npmByRepo,
+    pypiByRepo,
+    cargoByRepo,
+    t,
+  ]);
 
   // Per-repo daily series for the cumul stacked-bars view. We build all
   // three (views/clones/npm) eagerly — switching metric is a free toggle.
@@ -902,6 +941,20 @@ export default function OverviewRoute() {
         value: Number(r.downloads || 0),
       })),
     );
+    const pypi = buildPerRepo(
+      pypiByRepo.map((r) => ({
+        date: r.date,
+        repo: r.repo,
+        value: Number(r.downloads || 0),
+      })),
+    );
+    const cargo = buildPerRepo(
+      cargoByRepo.map((r) => ({
+        date: r.date,
+        repo: r.repo,
+        value: Number(r.downloads || 0),
+      })),
+    );
 
     const contrib = buildSingle(
       (heatmap?.days || []).map((d) => ({ date: d.date, value: d.count })),
@@ -924,8 +977,8 @@ export default function OverviewRoute() {
       'tokens',
     );
 
-    return { views, clones, npm, contrib, notes, llmTotal, llmClaude, llmCodex };
-  }, [heatmap, daily, obsidianActivity, trafficSeries, npmByRepo]);
+    return { views, clones, npm, pypi, cargo, contrib, notes, llmTotal, llmClaude, llmCodex };
+  }, [heatmap, daily, obsidianActivity, trafficSeries, npmByRepo, pypiByRepo, cargoByRepo]);
 
   const model = useMemo(() => {
     const today = startOfUtcDay(new Date());
@@ -1482,6 +1535,8 @@ export default function OverviewRoute() {
               { value: 'views', label: t('overview.heatmap.views') },
               { value: 'clones', label: t('overview.heatmap.clones') },
               { value: 'npm', label: t('overview.heatmap.npm') },
+              { value: 'pypi', label: t('overview.heatmap.pypi') },
+              { value: 'cargo', label: t('overview.heatmap.cargo') },
               { value: 'llm-total', label: 'LLM' },
               { value: 'llm-claude', label: 'Claude' },
               { value: 'llm-codex', label: 'Codex' },
@@ -1533,15 +1588,19 @@ export default function OverviewRoute() {
                     ? heatmapStackedDaily.clones
                     : heatmapMetric === 'npm'
                       ? heatmapStackedDaily.npm
-                      : heatmapMetric === 'contrib'
-                        ? heatmapStackedDaily.contrib
-                        : heatmapMetric === 'notes'
-                          ? heatmapStackedDaily.notes
-                          : heatmapMetric === 'llm-claude'
-                            ? heatmapStackedDaily.llmClaude
-                            : heatmapMetric === 'llm-codex'
-                              ? heatmapStackedDaily.llmCodex
-                              : heatmapStackedDaily.llmTotal;
+                      : heatmapMetric === 'pypi'
+                        ? heatmapStackedDaily.pypi
+                        : heatmapMetric === 'cargo'
+                          ? heatmapStackedDaily.cargo
+                          : heatmapMetric === 'contrib'
+                            ? heatmapStackedDaily.contrib
+                            : heatmapMetric === 'notes'
+                              ? heatmapStackedDaily.notes
+                              : heatmapMetric === 'llm-claude'
+                                ? heatmapStackedDaily.llmClaude
+                                : heatmapMetric === 'llm-codex'
+                                  ? heatmapStackedDaily.llmCodex
+                                  : heatmapStackedDaily.llmTotal;
               // Cumul X-axis runs from Jan 1 of the displayed year to TODAY
               // (clamped). Past today is the future — no point rendering
               // forward-extrapolated buckets that just carry the cumul flat.
@@ -1556,12 +1615,17 @@ export default function OverviewRoute() {
                     ? 'cyan'
                     : 'github';
               // Pending bucket cue: GitHub Traffic API (views/clones) and
-              // npm registry (downloads) lag the current day by 6-48 h.
-              // Mark today's bucket at reduced opacity + tooltip hint so
-              // the user understands why the column hasn't grown yet,
-              // instead of guessing the dashboard is stale.
+              // package registries (npm / pypi / cargo) all lag the
+              // current day by 6-48 h. Mark today's bucket at reduced
+              // opacity + tooltip hint so the user understands why the
+              // column hasn't grown yet instead of guessing the dashboard
+              // is stale.
               const isPendingMetric =
-                heatmapMetric === 'views' || heatmapMetric === 'clones' || heatmapMetric === 'npm';
+                heatmapMetric === 'views' ||
+                heatmapMetric === 'clones' ||
+                heatmapMetric === 'npm' ||
+                heatmapMetric === 'pypi' ||
+                heatmapMetric === 'cargo';
               const pendingBucket = isPendingMetric ? bucketOf(todayIso, groupBy) : null;
               return (
                 <HeatmapStackedBars

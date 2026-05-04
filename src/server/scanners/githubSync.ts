@@ -422,18 +422,165 @@ export async function syncGithubTraffic(
   return { repos: syncedRepos, days: syncedDays, errors };
 }
 
+type GithubCommitListItem = {
+  sha: string;
+  commit: {
+    author?: { date?: string; name?: string } | null;
+    committer?: { date?: string } | null;
+    message?: string;
+  };
+};
+
+/**
+ * Fetch the last 365 days of commits across every non-fork repo we know
+ * about, persist into `github_commits`. The schema stores `date` as
+ * INTEGER unix seconds (cf. migration 0012); per-day aggregation
+ * downstream reconstructs the ISO day with strftime, so no truncation
+ * here.
+ *
+ * No `author=` filter on purpose: GitHub's author resolution is brittle
+ * (commits with a noreply email that doesn't carry the numeric user-id
+ * prefix don't get linked, so the filter under-counts), and the
+ * per-project KPI strip wants total commit activity on the repo
+ * (including external contributors). User-attributed contributions are
+ * already covered by the heatmap via the GraphQL contributionsCollection.
+ *
+ * Pagination is capped at MAX_PAGES per repo — 5×100 = 500 commits / repo
+ * is comfortable headroom for personal projects on a 365 d window without
+ * spending the rate-limit budget on long-tail history.
+ *
+ * Per-commit additions/deletions require a second REST call each, which
+ * would multiply quota usage by N×500 with little payoff (we only show
+ * SHA + message + date in the UI). Skipped on purpose; the schema columns
+ * stay nullable.
+ */
+export async function syncGithubCommits(
+  db: Database,
+  login: string,
+): Promise<{ repos: number; commits: number; errors: string[] }> {
+  if (!login.trim()) {
+    throw new Error('github.username not configured — set it in Settings → GitHub.');
+  }
+  const token = await githubToken();
+  const nowTs = Math.floor(Date.now() / 1000);
+  const sinceIso = new Date(Date.now() - 365 * 86_400_000).toISOString();
+
+  const repos = db
+    .query<{ name: string }, []>(
+      'SELECT name FROM github_repos WHERE COALESCE(is_fork, 0) = 0 ORDER BY pushed_at DESC, name ASC',
+    )
+    .all();
+
+  const upsert = db.query(
+    `INSERT INTO github_commits (sha, repo, date, message, additions, deletions)
+     VALUES (?, ?, ?, ?, NULL, NULL)
+     ON CONFLICT(sha) DO UPDATE SET
+       repo    = excluded.repo,
+       date    = excluded.date,
+       message = excluded.message`,
+  );
+
+  let syncedRepos = 0;
+  let syncedCommits = 0;
+  const errors: string[] = [];
+
+  const PER_REPO_CONCURRENCY = 4;
+  const MAX_PAGES = 5;
+
+  const processRepo = async (row: { name: string }) => {
+    try {
+      let page = 1;
+      let total = 0;
+      while (page <= MAX_PAGES) {
+        const url =
+          `https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(row.name)}/commits` +
+          `?since=${encodeURIComponent(sinceIso)}&per_page=100&page=${page}`;
+        const response = await fetchWithTimeout(
+          url,
+          {
+            headers: {
+              authorization: `Bearer ${token}`,
+              accept: 'application/vnd.github+json',
+              'user-agent': 'vibecode-dash',
+            },
+          },
+          15_000,
+        );
+        if (response.status === 409) {
+          // Empty repo — GitHub returns 409 ("Git Repository is empty"). Skip silently.
+          break;
+        }
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(`commits ${response.status}: ${body.slice(0, 200)}`);
+        }
+        const payload = (await response.json()) as unknown;
+        if (!Array.isArray(payload)) {
+          throw new Error(`non-array commits payload: ${JSON.stringify(payload).slice(0, 200)}`);
+        }
+        const commits = payload as GithubCommitListItem[];
+        if (commits.length === 0) break;
+
+        for (const c of commits) {
+          if (typeof c.sha !== 'string' || c.sha.length === 0) continue;
+          const dateStr = c.commit?.author?.date ?? c.commit?.committer?.date ?? null;
+          const dateSec = toEpochSeconds(dateStr);
+          if (dateSec === null) continue;
+          const message = typeof c.commit?.message === 'string' ? c.commit.message : null;
+          upsert.run(c.sha, row.name, dateSec, message);
+          total += 1;
+        }
+
+        if (commits.length < 100) break; // last page
+        page += 1;
+      }
+      syncedCommits += total;
+      syncedRepos += 1;
+    } catch (error) {
+      errors.push(`${row.name}: ${String(error)}`);
+    }
+  };
+
+  for (let i = 0; i < repos.length; i += PER_REPO_CONCURRENCY) {
+    const batch = repos.slice(i, i + PER_REPO_CONCURRENCY);
+    await Promise.all(batch.map((r) => processRepo(r)));
+  }
+
+  db.query('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)').run(
+    'last_github_commits_sync',
+    String(nowTs),
+  );
+
+  return { repos: syncedRepos, commits: syncedCommits, errors };
+}
+
 export async function syncGithubAll(
   db: Database,
   login: string,
   year?: number,
-): Promise<{ repos: number; trafficRepos: number; trafficDays: number; trafficErrors: number }> {
+): Promise<{
+  repos: number;
+  trafficRepos: number;
+  trafficDays: number;
+  trafficErrors: number;
+  commitRepos: number;
+  commits: number;
+  commitErrors: number;
+}> {
   await syncGithubHeatmap(db, login, year);
   const repos = await syncGithubRepos(db, login);
   const traffic = await syncGithubTraffic(db, login);
+  // Commits sync depends on github_repos being populated first (we only
+  // crawl repos we know about). Errors are collected per-repo and don't
+  // abort the rest — same contract as syncGithubTraffic.
+  const commits = await syncGithubCommits(db, login);
   return {
     repos,
     trafficRepos: traffic.repos,
     trafficDays: traffic.days,
     trafficErrors: traffic.errors.length,
+    commitRepos: commits.repos,
+    commits: commits.commits,
+    commitErrors: commits.errors.length,
   };
 }

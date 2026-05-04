@@ -16,6 +16,7 @@ import {
   formatEurPerMillion,
   formatHours,
 } from '../lib/pricing';
+import { ProjectGithubTab } from './project-detail/GithubTab';
 
 type ProjectDetail = {
   id: string;
@@ -431,13 +432,14 @@ export default function ProjectDetailRoute() {
 
 // ═════════════════════ Layout orchestrator ═════════════════════
 
-type PanelTab = 'overview' | 'costs' | 'activity' | 'knowledge' | 'readme';
+type PanelTab = 'overview' | 'costs' | 'activity' | 'knowledge' | 'github' | 'readme';
 
 const TAB_DEFS: Array<{ id: PanelTab; label: string }> = [
   { id: 'overview', label: 'Overview' },
   { id: 'costs', label: 'Coûts' },
   { id: 'activity', label: 'Activité' },
   { id: 'knowledge', label: 'Knowledge' },
+  { id: 'github', label: 'GitHub' },
   { id: 'readme', label: 'README' },
 ];
 
@@ -566,6 +568,9 @@ function ProjectDetailLayout(props: {
           locale={props.locale}
           t={t}
         />
+      ) : null}
+      {activeTab === 'github' ? (
+        <ProjectGithubTab projectName={project.name} locale={props.locale} />
       ) : null}
       {activeTab === 'readme' ? (
         <Card>

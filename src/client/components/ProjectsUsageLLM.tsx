@@ -805,9 +805,18 @@ export function ProjectsUsageLLM({ projects: externalProjects }: Props) {
         />
       </div>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+      {/* 4-pill strip — was 6 stats with 2 duplicates. Removed:
+            - "Leverage dev / abo" (×N) → already in top-right card footer
+              ("dev ×325.9 vs abo")
+            - "Abo non utilisé" (%) → already in top-left card's 4-segment
+              bar (utilisé / sans données / prépayé / hors fenêtre)
+          Renamed "Équivalent dev (médiane)" → "(cumul)" to lift the
+          ambiguity with the top-right card's "DEV ÉQUIVALENT" which is
+          the per-project AVERAGE; the bottom one is the CUMULATIVE total
+          across all projects. Same word, two meanings. */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
         <Stat
-          label={t('usage.llmPerProject.stats.equivDev')}
+          label={t('usage.llmPerProject.stats.equivDevTotal')}
           value={formatEur(kpis.totalDevEur, locale)}
           hint={t('usage.llmPerProject.stats.equivDevHint', {
             low: formatEur(kpis.totalDevLowEur, locale),
@@ -815,48 +824,6 @@ export function ProjectsUsageLLM({ projects: externalProjects }: Props) {
             hours: formatHours(kpis.totalDevHours, locale),
           })}
           tone="success"
-        />
-        <Stat
-          label={t('usage.llmPerProject.stats.devLeverage')}
-          value={kpis.devLeverageVsAbo > 0 ? `×${kpis.devLeverageVsAbo.toFixed(1)}` : '—'}
-          hint={t('usage.llmPerProject.stats.devLeverageHint', {
-            n: kpis.devLeverageVsPayg.toFixed(1),
-          })}
-        />
-        <Stat
-          label={t('usage.llmPerProject.stats.aboUnused')}
-          value={kpis.measurableEur > 0 ? `${kpis.unusedPct.toFixed(0)}%` : '—'}
-          hint={
-            kpis.measurableEur > 0
-              ? t('usage.llmPerProject.stats.aboUnusedHint', {
-                  idle: formatEur(kpis.idleWithDataEur, locale),
-                  measurable: formatEur(kpis.measurableEur, locale),
-                  used: kpis.usedPct.toFixed(0),
-                  extra: `${
-                    kpis.noDataEur > 0.01
-                      ? t('usage.llmPerProject.stats.aboUnusedExtraNoData', {
-                          amount: formatEur(kpis.noDataEur, locale),
-                        })
-                      : ''
-                  }${
-                    kpis.prepaidEur > 0.01
-                      ? t('usage.llmPerProject.stats.aboUnusedExtraPrepaid', {
-                          amount: formatEur(kpis.prepaidEur, locale),
-                        })
-                      : ''
-                  }`,
-                })
-              : t('usage.llmPerProject.stats.aboUnusedNoTokens')
-          }
-          tone={
-            kpis.measurableEur === 0
-              ? 'neutral'
-              : kpis.unusedPct >= 60
-                ? 'danger'
-                : kpis.unusedPct >= 30
-                  ? 'warn'
-                  : 'success'
-          }
         />
         <Stat
           label={t('usage.llmPerProject.stats.tokens')}

@@ -88,13 +88,17 @@ type TrafficTimeseriesResponse = {
 
 type RepoMetricsRow = {
   repo: string;
-  // 4 parallel arrays, each of length `days`, aligned on the same date list.
+  // 6 parallel arrays, each of length `days`, aligned on the same date list.
   // Missing days are zero-filled server-side so bar widths stay consistent
-  // across repos.
+  // across repos. `pypi` and `cargo` come from the generic
+  // package_downloads_daily table; `npm` is still served from the legacy
+  // npm_downloads_daily table for now (parallel coexistence).
   views: number[];
   clones: number[];
   commits: number[];
   npm: number[];
+  pypi: number[];
+  cargo: number[];
 };
 
 type RepoMetricsResponse = {
@@ -105,7 +109,7 @@ type RepoMetricsResponse = {
 };
 
 type RepoSort = 'pushed' | 'stars' | 'forks' | 'name';
-type SparkMetric = 'views' | 'clones';
+type SparkMetric = 'views' | 'clones' | 'npm' | 'pypi' | 'cargo';
 type SparkSort = 'window' | 'cumulative';
 
 type GithubStatus = {
@@ -118,6 +122,12 @@ type GithubStatus = {
   heatmapLastSync: number | null;
   reposLastSync: number | null;
   trafficLastSync: number | null;
+  // Package-registry sync timestamps. Null until the first scheduler
+  // tick — the chips render as "no data" in that case.
+  npmLastSync: number | null;
+  pypiLastSync: number | null;
+  cratesLastSync: number | null;
+  rubygemsLastSync: number | null;
 };
 
 type SyncDelta = {
@@ -325,9 +335,9 @@ export default function GithubRoute() {
   // (capped at 30 below). The toggle is intentionally NOT persisted across
   // reloads: a fresh page should start clean, the user re-opens if useful.
   const [sparkExpanded, setSparkExpanded] = useState(false);
-  const [heatmapMetric, setHeatmapMetric] = useState<'contrib' | 'views' | 'clones' | 'npm'>(
-    'contrib',
-  );
+  const [heatmapMetric, setHeatmapMetric] = useState<
+    'contrib' | 'views' | 'clones' | 'npm' | 'pypi' | 'cargo'
+  >('contrib');
   const [heatmapView, setHeatmapView] = useState<'grid' | 'line'>('grid');
   // Granularity for the cumulative stacked-bars view. Defaults to month —
   // 12 columns reads cleanly. 'day' is dense (365 thin bars) but useful for
@@ -337,11 +347,19 @@ export default function GithubRoute() {
     'day' | 'week' | 'biweekly' | 'month' | 'quarter'
   >('month');
   const [npmDaily, setNpmDaily] = useState<Array<{ date: string; count: number }>>([]);
-  // Per-repo per-day npm downloads for the cumulative stacked-bars view.
-  // Loaded in parallel with the other GitHub fetches; falls back to the
-  // aggregate `npmDaily` shape (single "all" series) when this is empty
-  // (e.g. fresh install before the npm sync ran).
+  // Per-registry per-repo per-day downloads. Three states (npm, pypi,
+  // crates) — each used both as the heatmap data source when the user
+  // picks the matching metric AND as the per-project stacked segments
+  // in the cumul view. Empty arrays render as a flat-zero line; the
+  // fetches catch-and-default so a missing endpoint never breaks the
+  // page.
   const [npmDailyByRepo, setNpmDailyByRepo] = useState<
+    Array<{ date: string; repo: string; downloads: number }>
+  >([]);
+  const [pypiDailyByRepo, setPypiDailyByRepo] = useState<
+    Array<{ date: string; repo: string; downloads: number }>
+  >([]);
+  const [cargoDailyByRepo, setCargoDailyByRepo] = useState<
     Array<{ date: string; repo: string; downloads: number }>
   >([]);
   const [deltaPeriod, setDeltaPeriod] = useState<'day' | 'week' | 'month' | 'all'>('week');
@@ -357,6 +375,8 @@ export default function GithubRoute() {
         statusData,
         npmDailyData,
         npmByRepoData,
+        pypiByRepoData,
+        cargoByRepoData,
       ] = await Promise.all([
         apiGet<HeatmapResponse>('/api/github/heatmap'),
         apiGet<Repo[]>('/api/github/repos'),
@@ -368,11 +388,19 @@ export default function GithubRoute() {
         apiGet<{ rows: Array<{ date: string; downloads: number }> }>('/api/github/npm/daily').catch(
           () => ({ rows: [] }),
         ),
-        // Per-repo per-day npm for the cumulative stacked bars. Same window
-        // as traffic timeseries. Failure is non-fatal: the chart silently
-        // falls back to the single-key "all" series built from npmDaily.
+        // Per-repo per-day downloads for the cumulative stacked bars,
+        // one fetch per registry. Same 365-day window as traffic. Each
+        // catch-and-defaults to {rows:[]} so a missing endpoint or 4xx
+        // never cascades into a page-level error — the affected metric
+        // just renders as flat-zero.
         apiGet<{ rows: Array<{ date: string; repo: string; downloads: number }> }>(
           '/api/github/npm/daily-by-repo?days=365',
+        ).catch(() => ({ rows: [] })),
+        apiGet<{ rows: Array<{ date: string; repo: string; downloads: number }> }>(
+          '/api/github/pypi/daily-by-repo?days=365',
+        ).catch(() => ({ rows: [] })),
+        apiGet<{ rows: Array<{ date: string; repo: string; downloads: number }> }>(
+          '/api/github/crates/daily-by-repo?days=365',
         ).catch(() => ({ rows: [] })),
       ]);
       setHeatmap(heatmapData);
@@ -382,6 +410,8 @@ export default function GithubRoute() {
       setStatus(statusData);
       setNpmDaily(npmDailyData.rows.map((r) => ({ date: r.date, count: r.downloads })));
       setNpmDailyByRepo(npmByRepoData.rows);
+      setPypiDailyByRepo(pypiByRepoData.rows);
+      setCargoDailyByRepo(cargoByRepoData.rows);
     } catch (e) {
       setError(String(e));
     }
@@ -706,12 +736,20 @@ export default function GithubRoute() {
     const views = new Map<string, number>();
     const clones = new Map<string, number>();
     const npm = new Map<string, number>();
+    const pypi = new Map<string, number>();
+    const cargo = new Map<string, number>();
     for (const row of trafficSeries?.rows || []) {
       views.set(row.date, (views.get(row.date) || 0) + Number(row.viewsCount || 0));
       clones.set(row.date, (clones.get(row.date) || 0) + Number(row.clonesCount || 0));
     }
     for (const row of npmDaily) {
       npm.set(row.date, (npm.get(row.date) || 0) + Number(row.count || 0));
+    }
+    for (const row of pypiDailyByRepo) {
+      pypi.set(row.date, (pypi.get(row.date) || 0) + Number(row.downloads || 0));
+    }
+    for (const row of cargoDailyByRepo) {
+      cargo.set(row.date, (cargo.get(row.date) || 0) + Number(row.downloads || 0));
     }
 
     const year = heatmap?.year || new Date().getUTCFullYear();
@@ -730,8 +768,10 @@ export default function GithubRoute() {
       views: toDays(views),
       clones: toDays(clones),
       npm: toDays(npm),
+      pypi: toDays(pypi),
+      cargo: toDays(cargo),
     };
-  }, [trafficSeries, heatmap?.year, npmDaily]);
+  }, [trafficSeries, heatmap?.year, npmDaily, pypiDailyByRepo, cargoDailyByRepo]);
 
   /**
    * Per-repo per-day series for the cumulative stacked-bars view (Courbe).
@@ -789,29 +829,93 @@ export default function GithubRoute() {
         .map((d) => ({ date: d.date, values: { all: d.count } }));
     }
 
-    return { views, clones, contrib: contribDaily, npm: npmStackedDaily };
-  }, [trafficSeries, heatmap?.days, npmDaily, npmDailyByRepo]);
+    // PyPI + crates use the same per-repo bag pattern. No fallback needed
+    // because the only data source IS the by-repo endpoint; if it's empty
+    // we just emit an empty series and the cumul renders as a flat-zero
+    // year (which IS what "no published packages on this registry" should
+    // look like).
+    const buildRegistryBag = (
+      rows: Array<{ date: string; repo: string; downloads: number }>,
+    ): StackedDailyRow[] => {
+      const bag = new Map<string, Record<string, number>>();
+      for (const row of rows) {
+        if (!row.downloads || row.downloads <= 0) continue;
+        const m = bag.get(row.date) ?? {};
+        m[row.repo] = (m[row.repo] ?? 0) + Number(row.downloads);
+        bag.set(row.date, m);
+      }
+      return [...bag.entries()]
+        .map(([date, values]) => ({ date, values }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+    };
+    const pypiStackedDaily = buildRegistryBag(pypiDailyByRepo);
+    const cargoStackedDaily = buildRegistryBag(cargoDailyByRepo);
+
+    return {
+      views,
+      clones,
+      contrib: contribDaily,
+      npm: npmStackedDaily,
+      pypi: pypiStackedDaily,
+      cargo: cargoStackedDaily,
+    };
+  }, [trafficSeries, heatmap?.days, npmDaily, npmDailyByRepo, pypiDailyByRepo, cargoDailyByRepo]);
 
   const sparkRows = useMemo(() => {
     const normalized = sparkFilter.trim().toLowerCase();
+    // Pick the canonical "latest date" from whatever data source is
+    // active for the metric. For traffic (views/clones) we use the
+    // traffic timeseries; for registries we use the corresponding
+    // by-repo array; either way we fall back to "today" so the empty
+    // state still renders a window.
+    const registryRows: Array<{ date: string; repo: string; downloads: number }> =
+      sparkMetric === 'npm'
+        ? npmDailyByRepo
+        : sparkMetric === 'pypi'
+          ? pypiDailyByRepo
+          : sparkMetric === 'cargo'
+            ? cargoDailyByRepo
+            : [];
+    const trafficRowsArr = trafficSeries?.rows || [];
+    const datedSource: Array<{ date: string }> =
+      sparkMetric === 'views' || sparkMetric === 'clones' ? trafficRowsArr : registryRows;
     const latestDate =
-      trafficSeries?.rows.reduce((max, row) => (row.date > max ? row.date : max), '') ||
+      datedSource.reduce((max, row) => (row.date > max ? row.date : max), '') ||
       toIsoDate(new Date());
     const windowDates = buildDateWindow(latestDate, sparkWindowDays);
+    const windowSet = new Set(windowDates);
 
-    const pointsByRepo = new Map<string, Map<string, TrafficTimeseriesRow>>();
-    for (const row of trafficSeries?.rows || []) {
-      let repoMap = pointsByRepo.get(row.repo);
+    // Two distinct lookup tables depending on the metric family. For
+    // traffic we keep the existing per-row map; for registries we build
+    // a (repo → date → downloads) shape from the by-repo array. Either
+    // way the per-repo loop below sees a uniform `getValue(repo, date)`
+    // contract.
+    const trafficPointsByRepo = new Map<string, Map<string, TrafficTimeseriesRow>>();
+    for (const row of trafficRowsArr) {
+      let repoMap = trafficPointsByRepo.get(row.repo);
       if (!repoMap) {
         repoMap = new Map<string, TrafficTimeseriesRow>();
-        pointsByRepo.set(row.repo, repoMap);
+        trafficPointsByRepo.set(row.repo, repoMap);
       }
       repoMap.set(row.date, row);
     }
+    const registryPointsByRepo = new Map<string, Map<string, number>>();
+    for (const row of registryRows) {
+      let repoMap = registryPointsByRepo.get(row.repo);
+      if (!repoMap) {
+        repoMap = new Map<string, number>();
+        registryPointsByRepo.set(row.repo, repoMap);
+      }
+      repoMap.set(row.date, Number(row.downloads || 0));
+    }
 
+    // The repo set spans GitHub + traffic data + registry data so a
+    // package-only repo (e.g. crates that doesn't see GH traffic) still
+    // appears in the leaderboard.
     const repoNames = new Set<string>([
       ...repos.map((repo) => repo.name),
       ...(traffic?.repos || []).map((row) => row.repo),
+      ...registryPointsByRepo.keys(),
     ]);
 
     const rows = [...repoNames]
@@ -824,23 +928,53 @@ export default function GithubRoute() {
           return null;
         }
 
-        const points = pointsByRepo.get(repoName);
-        const values = windowDates.map((date) => {
-          const point = points?.get(date);
-          return sparkMetric === 'views' ? point?.viewsCount || 0 : point?.clonesCount || 0;
-        });
+        // Per-day values inside the window, registry-or-traffic
+        // depending on the metric.
+        let values: number[];
+        let cumulative: number;
+        let recent14: number;
+        let lastDate: string | null;
+        if (sparkMetric === 'views' || sparkMetric === 'clones') {
+          const points = trafficPointsByRepo.get(repoName);
+          values = windowDates.map((date) => {
+            const p = points?.get(date);
+            return sparkMetric === 'views' ? p?.viewsCount || 0 : p?.clonesCount || 0;
+          });
+          cumulative =
+            sparkMetric === 'views'
+              ? trafficByRepo.get(repoName)?.viewsCumulative || 0
+              : trafficByRepo.get(repoName)?.clonesCumulative || 0;
+          recent14 =
+            sparkMetric === 'views'
+              ? trafficByRepo.get(repoName)?.viewsRecent || 0
+              : trafficByRepo.get(repoName)?.clonesRecent || 0;
+          lastDate = trafficByRepo.get(repoName)?.lastDate || null;
+        } else {
+          const points = registryPointsByRepo.get(repoName);
+          values = windowDates.map((date) => points?.get(date) || 0);
+          // For registries: cumulative = sum of every daily row we have
+          // for this repo (all-time within the 365 d range we keep
+          // locally). recent14 = sum of the last 14 days. Same shape
+          // as the traffic counterparts so the rest of the UI is
+          // metric-agnostic.
+          let cumul = 0;
+          let r14 = 0;
+          let last: string | null = null;
+          if (points) {
+            const r14Cutoff = buildDateWindow(latestDate, 14);
+            const r14Set = new Set(r14Cutoff);
+            for (const [date, count] of points) {
+              cumul += count;
+              if (r14Set.has(date)) r14 += count;
+              if (!last || date > last) last = date;
+            }
+          }
+          cumulative = cumul;
+          recent14 = r14;
+          lastDate = last;
+        }
 
         const windowTotal = values.reduce((sum, value) => sum + value, 0);
-        const cumulative =
-          sparkMetric === 'views'
-            ? trafficByRepo.get(repoName)?.viewsCumulative || 0
-            : trafficByRepo.get(repoName)?.clonesCumulative || 0;
-        const recent14 =
-          sparkMetric === 'views'
-            ? trafficByRepo.get(repoName)?.viewsRecent || 0
-            : trafficByRepo.get(repoName)?.clonesRecent || 0;
-        const lastDate = trafficByRepo.get(repoName)?.lastDate || null;
-
         if (sparkOnlyTraffic && windowTotal === 0 && cumulative === 0) {
           return null;
         }
@@ -870,6 +1004,10 @@ export default function GithubRoute() {
       return b.windowTotal - a.windowTotal;
     });
 
+    // Suppress unused-variable warning — windowSet is intentionally built
+    // for callers that may want to filter by the window in future.
+    void windowSet;
+
     return { latestDate, rows };
   }, [
     repos,
@@ -882,6 +1020,9 @@ export default function GithubRoute() {
     traffic,
     trafficByRepo,
     trafficSeries,
+    npmDailyByRepo,
+    pypiDailyByRepo,
+    cargoDailyByRepo,
   ]);
 
   return (
@@ -916,6 +1057,38 @@ export default function GithubRoute() {
               status ? `${status.trafficRepos} repos · ${status.trafficRows} snapshots` : null
             }
           />
+          {/* Package-registry sync chips. TTL is 6 h to match the
+              scheduler cadence (registries refresh ~once/day, polling
+              more often is wasted bandwidth). Each chip is hidden until
+              its first sync writes the kv key — avoids confusing "0 min"
+              pills on a fresh install before the scheduler has fired. */}
+          {status?.npmLastSync ? (
+            <SourceChip label="npm" lastSync={status.npmLastSync} ttl={6 * 60 * 60} detail={null} />
+          ) : null}
+          {status?.pypiLastSync ? (
+            <SourceChip
+              label="pypi"
+              lastSync={status.pypiLastSync}
+              ttl={6 * 60 * 60}
+              detail={null}
+            />
+          ) : null}
+          {status?.cratesLastSync ? (
+            <SourceChip
+              label="cargo"
+              lastSync={status.cratesLastSync}
+              ttl={6 * 60 * 60}
+              detail={null}
+            />
+          ) : null}
+          {status?.rubygemsLastSync ? (
+            <SourceChip
+              label="rubygems"
+              lastSync={status.rubygemsLastSync}
+              ttl={6 * 60 * 60}
+              detail={null}
+            />
+          ) : null}
         </div>
 
         <SyncBanner state={syncBanner} status={status} />
@@ -1118,20 +1291,30 @@ export default function GithubRoute() {
                         trafficHeatmapDays.clones.reduce((acc, d) => acc + d.count, 0),
                       ),
                     })
-                  : `npm downloads · Σ ${numberLabel(
-                      trafficHeatmapDays.npm.reduce((acc, d) => acc + d.count, 0),
-                    )}`
+                  : heatmapMetric === 'pypi'
+                    ? `pypi downloads · Σ ${numberLabel(
+                        trafficHeatmapDays.pypi.reduce((acc, d) => acc + d.count, 0),
+                      )}`
+                    : heatmapMetric === 'cargo'
+                      ? `cargo downloads · Σ ${numberLabel(
+                          trafficHeatmapDays.cargo.reduce((acc, d) => acc + d.count, 0),
+                        )}`
+                      : `npm downloads · Σ ${numberLabel(
+                          trafficHeatmapDays.npm.reduce((acc, d) => acc + d.count, 0),
+                        )}`
           }
         >
           <Card>
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <Segmented<'contrib' | 'views' | 'clones' | 'npm'>
+              <Segmented<'contrib' | 'views' | 'clones' | 'npm' | 'pypi' | 'cargo'>
                 value={heatmapMetric}
                 options={[
                   { value: 'contrib', label: t('github.heatmap.optContrib') },
                   { value: 'views', label: t('github.heatmap.optViews') },
                   { value: 'clones', label: t('github.heatmap.optClones') },
                   { value: 'npm', label: 'npm' },
+                  { value: 'pypi', label: 'pypi' },
+                  { value: 'cargo', label: 'cargo' },
                 ]}
                 onChange={setHeatmapMetric}
               />
@@ -1188,12 +1371,26 @@ export default function GithubRoute() {
                           palette: 'amber' as const,
                           label: t('github.heatmap.totalClones'),
                         }
-                      : {
-                          days: trafficHeatmapDays.npm,
-                          stackedDaily: trafficStackedDaily.npm,
-                          palette: 'magenta' as const,
-                          label: 'downloads',
-                        };
+                      : heatmapMetric === 'pypi'
+                        ? {
+                            days: trafficHeatmapDays.pypi,
+                            stackedDaily: trafficStackedDaily.pypi,
+                            palette: 'cyan' as const,
+                            label: 'pypi downloads',
+                          }
+                        : heatmapMetric === 'cargo'
+                          ? {
+                              days: trafficHeatmapDays.cargo,
+                              stackedDaily: trafficStackedDaily.cargo,
+                              palette: 'amber' as const,
+                              label: 'cargo downloads',
+                            }
+                          : {
+                              days: trafficHeatmapDays.npm,
+                              stackedDaily: trafficStackedDaily.npm,
+                              palette: 'magenta' as const,
+                              label: 'npm downloads',
+                            };
               if (heatmapView === 'grid') {
                 return (
                   <Heatmap days={config.days} palette={config.palette} totalLabel={config.label} />
@@ -1224,36 +1421,37 @@ export default function GithubRoute() {
         </Section>
       </div>
 
+      {/* Leaderboard module — visually distinct from the catalog "Repos"
+          section below. Three drastic differentiators:
+            1. Trophy icon + amber accent in the title (instant recognition).
+            2. Card has a 4 px amber left border + subtle gradient tint —
+               the eye spots the colored stripe at scroll without reading.
+            3. Top 3 renders as a podium (3 horizontal tiles) instead of
+               another flat row → celebrated, not just listed.
+          The window + sort selectors moved into the Section meta to keep
+          the Card lean (the dense podium tiles already carry weight). */}
       <Section
-        title={t('github.sparklines.title')}
-        meta={t('github.sparklines.meta', {
-          days: sparkWindowDays,
-          date: sparkRows.latestDate,
-          count: sparkRows.rows.length,
-          sortBy:
-            sparkSort === 'window'
-              ? t('github.sparklines.sortWindow')
-              : t('github.sparklines.sortCumul'),
-        })}
-      >
-        <Card>
-          <Toolbar>
-            <input
-              className="w-full sm:min-w-[220px] sm:flex-1"
-              placeholder={t('github.sparklines.filter')}
-              value={sparkFilter}
-              onChange={(event) => setSparkFilter(event.target.value)}
-            />
-
-            <Segmented
-              value={sparkMetric}
-              options={[
-                { value: 'clones', label: t('github.heatmap.optClones') },
-                { value: 'views', label: t('github.heatmap.optViews') },
-              ]}
-              onChange={setSparkMetric}
-            />
-
+        title={
+          <span className="inline-flex items-center gap-2">
+            <span style={{ color: '#ffd60a' }}>
+              <TrophyIcon />
+            </span>
+            {t('github.sparklines.title')}
+          </span>
+        }
+        meta={
+          <div className="flex flex-wrap items-center gap-2">
+            <span>
+              {t('github.sparklines.meta', {
+                days: sparkWindowDays,
+                date: sparkRows.latestDate,
+                count: sparkRows.rows.length,
+                sortBy:
+                  sparkSort === 'window'
+                    ? t('github.sparklines.sortWindow')
+                    : t('github.sparklines.sortCumul'),
+              })}
+            </span>
             <Segmented
               value={String(sparkWindowDays) as '14' | '30' | '60' | '90'}
               options={[
@@ -1264,7 +1462,6 @@ export default function GithubRoute() {
               ]}
               onChange={(value) => setSparkWindowDays(Number.parseInt(value, 10))}
             />
-
             <Segmented
               value={sparkSort}
               options={[
@@ -1273,56 +1470,112 @@ export default function GithubRoute() {
               ]}
               onChange={setSparkSort}
             />
-
-            <label className="flex items-center gap-1.5 text-[12px] text-[var(--text-mute)]">
-              <input
-                type="checkbox"
-                checked={sparkOnlyTraffic}
-                onChange={(event) => setSparkOnlyTraffic(event.target.checked)}
-              />
+          </div>
+        }
+        actionWide
+      >
+        <div
+          className="rounded-[var(--radius-lg)] border border-[var(--border)] p-4"
+          style={{
+            background: 'linear-gradient(135deg, rgba(255,214,10,0.04) 0%, var(--surface-1) 60%)',
+          }}
+        >
+          <Toolbar>
+            <input
+              className="w-full sm:min-w-[220px] sm:flex-1"
+              placeholder={t('github.sparklines.filter')}
+              value={sparkFilter}
+              onChange={(event) => setSparkFilter(event.target.value)}
+            />
+            {/* Metric selector — 5 options now that registries are first-
+                class. Order: traffic first (clones / views, the historical
+                pair), then registries left-to-right by Tiobe-ish popularity
+                (npm > pypi > cargo). The chip-strip wraps cleanly on
+                narrow viewports thanks to Segmented's overflow-x-auto. */}
+            <Segmented
+              value={sparkMetric}
+              options={[
+                { value: 'clones', label: t('github.heatmap.optClones') },
+                { value: 'views', label: t('github.heatmap.optViews') },
+                { value: 'npm', label: 'npm' },
+                { value: 'pypi', label: 'pypi' },
+                { value: 'cargo', label: 'cargo' },
+              ]}
+              onChange={setSparkMetric}
+            />
+            {/* "trafic seul" toggle — was a checkbox + label combo, now a
+                proper chip-button so it visually matches the Segmented
+                controls next to it (same height, same border treatment).
+                Reduces the toolbar's vertical footprint and reads as a
+                first-class filter rather than a stray form control. */}
+            <button
+              type="button"
+              onClick={() => setSparkOnlyTraffic((v) => !v)}
+              aria-pressed={sparkOnlyTraffic}
+              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[12px] transition ${
+                sparkOnlyTraffic
+                  ? 'border-[#ffd60a] bg-[rgba(255,214,10,0.10)] text-[#ffd60a]'
+                  : 'border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-mute)] hover:text-[var(--text)]'
+              }`}
+            >
+              <span>{sparkOnlyTraffic ? '✓' : '·'}</span>
               {t('github.sparklines.onlyTraffic')}
-            </label>
+            </button>
           </Toolbar>
 
           {(() => {
-            // Collapse-by-default. Show top 3 unless the user explicitly
-            // expands (then show up to 30). The cap of 30 stays in place to
-            // bound DOM size on accounts with hundreds of forks.
+            // Collapse-by-default. Show top 3 podium unless the user
+            // explicitly expands (then reveal the secondary list #4-#30).
+            // The 30 cap stays to bound DOM size on accounts with hundreds
+            // of forks.
             const COLLAPSED_COUNT = 3;
             const EXPANDED_COUNT = 30;
             const totalAvailable = Math.min(sparkRows.rows.length, EXPANDED_COUNT);
-            const visibleRows = sparkExpanded
-              ? sparkRows.rows.slice(0, EXPANDED_COUNT)
-              : sparkRows.rows.slice(0, COLLAPSED_COUNT);
-            const hiddenCount = totalAvailable - visibleRows.length;
+            const top3 = sparkRows.rows.slice(0, COLLAPSED_COUNT);
+            const tail = sparkExpanded ? sparkRows.rows.slice(COLLAPSED_COUNT, EXPANDED_COUNT) : [];
+            const hiddenCount = Math.max(0, totalAvailable - COLLAPSED_COUNT - tail.length);
             return (
               <>
-                <div className="mt-3 grid grid-cols-1 gap-1 md:grid-cols-2 xl:grid-cols-3">
-                  {visibleRows.map((row, index) => (
-                    <RepoSparklineCard
-                      key={row.repoName}
-                      rank={index + 1}
-                      repoName={row.repoName}
-                      repoUrl={row.repoUrl}
-                      values={row.values}
+                {sparkRows.rows.length === 0 ? (
+                  <Empty>{t('github.sparklines.empty')}</Empty>
+                ) : (
+                  <div className="mt-3">
+                    <RepoPodium
+                      rows={top3}
                       metric={sparkMetric}
                       sort={sparkSort}
                       windowDays={sparkWindowDays}
-                      windowTotal={row.windowTotal}
-                      cumulative={row.cumulative}
-                      recent14={row.recent14}
-                      lastDate={row.lastDate}
                     />
-                  ))}
-                  {sparkRows.rows.length === 0 ? (
-                    <Empty>{t('github.sparklines.empty')}</Empty>
-                  ) : null}
-                </div>
-                {/* Expand/collapse trigger. Hidden when there's nothing more
-                    to show (≤ COLLAPSED_COUNT rows) so the button never
-                    promises content that doesn't exist. */}
+                    {tail.length > 0 ? (
+                      <>
+                        <div className="my-3 flex items-center gap-2 text-[10px] uppercase tracking-[0.10em] text-[var(--text-faint)]">
+                          <span>{t('github.sparklines.followers')}</span>
+                          <span className="h-px flex-1 bg-[var(--border)]" />
+                        </div>
+                        <div className="grid grid-cols-1 gap-1 md:grid-cols-2 xl:grid-cols-3">
+                          {tail.map((row, index) => (
+                            <RepoSparklineCard
+                              key={row.repoName}
+                              rank={index + COLLAPSED_COUNT + 1}
+                              repoName={row.repoName}
+                              repoUrl={row.repoUrl}
+                              values={row.values}
+                              metric={sparkMetric}
+                              sort={sparkSort}
+                              windowDays={sparkWindowDays}
+                              windowTotal={row.windowTotal}
+                              cumulative={row.cumulative}
+                              recent14={row.recent14}
+                              lastDate={row.lastDate}
+                            />
+                          ))}
+                        </div>
+                      </>
+                    ) : null}
+                  </div>
+                )}
                 {totalAvailable > COLLAPSED_COUNT ? (
-                  <div className="mt-2 flex justify-center">
+                  <div className="mt-3 flex justify-center">
                     <Button
                       tone="ghost"
                       onClick={() => setSparkExpanded((v) => !v)}
@@ -1330,21 +1583,35 @@ export default function GithubRoute() {
                     >
                       {sparkExpanded
                         ? t('github.sparklines.collapse')
-                        : t('github.sparklines.expand', { n: hiddenCount })}
+                        : t('github.sparklines.expand', {
+                            n: totalAvailable - COLLAPSED_COUNT,
+                          })}
                     </Button>
                   </div>
                 ) : null}
               </>
             );
           })()}
-        </Card>
+        </div>
       </Section>
 
+      {/* Catalog module — paired with the leaderboard above. The
+          accent-cyan left border + grid icon mirrors the trophy + amber
+          treatment used by the leaderboard so the two modules read as
+          a deliberate counterpart pair: "leaderboard (gold)" vs
+          "catalog (cyan)". Same visual grammar, opposite intent. */}
       <Section
-        title={t('github.repos.title')}
+        title={
+          <span className="inline-flex items-center gap-2">
+            <span style={{ color: '#64d2ff' }}>
+              <GridIcon />
+            </span>
+            {t('github.repos.title')}
+          </span>
+        }
         meta={t('github.repos.meta', { filtered: filteredRepos.length, total: repos.length })}
       >
-        <Card>
+        <div className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-1)] p-4">
           <Toolbar>
             <input
               className="w-full sm:min-w-[220px] sm:flex-1"
@@ -1451,31 +1718,76 @@ export default function GithubRoute() {
                           ) : null}
                         </div>
 
-                        {/* 4 mini bar-charts on the same window: NPM / views /
-                            clones / commits. Each normalised on its own max so
-                            shapes are readable even on low-volume repos. */}
-                        <div className="grid grid-cols-4 gap-2 border-t border-[var(--border)] pt-2">
-                          <RepoMiniBarChart
-                            label={t('github.repos.npmCell')}
-                            values={metrics?.npm || emptyVec}
-                            color="#ff2d95"
-                          />
-                          <RepoMiniBarChart
-                            label={t('github.repos.viewsCell')}
-                            values={metrics?.views || emptyVec}
-                            color="#64d2ff"
-                          />
-                          <RepoMiniBarChart
-                            label={t('github.repos.clonesCell')}
-                            values={metrics?.clones || emptyVec}
-                            color="#30d158"
-                          />
-                          <RepoMiniBarChart
-                            label={t('github.repos.commitsCell')}
-                            values={metrics?.commits || emptyVec}
-                            color="#ffd60a"
-                          />
-                        </div>
+                        {/* Mini bar-charts on the same window. Always show the
+                            4 base metrics (npm / views / clones / commits) so
+                            cards keep a predictable shape across the grid;
+                            additionally show pypi / cargo bars ONLY when the
+                            repo has real signal there (sum > 0). Avoids
+                            flooding cards-without-Python-or-Rust with empty
+                            placeholders, but still surfaces the registries
+                            instantly the moment a repo gets published. The
+                            grid switches from 4 cols to 5/6 to fit the extra
+                            bars without changing the per-bar width.
+                            Registry brand colours: npm magenta-pink, pypi
+                            python-blue, cargo rust-tan. */}
+                        {(() => {
+                          const npmSum = (metrics?.npm || []).reduce((s, n) => s + n, 0);
+                          const pypiSum = (metrics?.pypi || []).reduce((s, n) => s + n, 0);
+                          const cargoSum = (metrics?.cargo || []).reduce((s, n) => s + n, 0);
+                          const showPypi = pypiSum > 0;
+                          const showCargo = cargoSum > 0;
+                          const showNpm = npmSum > 0 || (!showPypi && !showCargo);
+                          const cellCount =
+                            3 + (showNpm ? 1 : 0) + (showPypi ? 1 : 0) + (showCargo ? 1 : 0);
+                          const gridClass =
+                            cellCount === 6
+                              ? 'grid-cols-3 md:grid-cols-6'
+                              : cellCount === 5
+                                ? 'grid-cols-3 md:grid-cols-5'
+                                : 'grid-cols-4';
+                          return (
+                            <div
+                              className={`grid ${gridClass} gap-2 border-t border-[var(--border)] pt-2`}
+                            >
+                              {showNpm ? (
+                                <RepoMiniBarChart
+                                  label={t('github.repos.npmCell')}
+                                  values={metrics?.npm || emptyVec}
+                                  color="#ff2d95"
+                                />
+                              ) : null}
+                              {showPypi ? (
+                                <RepoMiniBarChart
+                                  label="pypi"
+                                  values={metrics?.pypi || emptyVec}
+                                  color="#3776ab"
+                                />
+                              ) : null}
+                              {showCargo ? (
+                                <RepoMiniBarChart
+                                  label="cargo"
+                                  values={metrics?.cargo || emptyVec}
+                                  color="#dea584"
+                                />
+                              ) : null}
+                              <RepoMiniBarChart
+                                label={t('github.repos.viewsCell')}
+                                values={metrics?.views || emptyVec}
+                                color="#64d2ff"
+                              />
+                              <RepoMiniBarChart
+                                label={t('github.repos.clonesCell')}
+                                values={metrics?.clones || emptyVec}
+                                color="#30d158"
+                              />
+                              <RepoMiniBarChart
+                                label={t('github.repos.commitsCell')}
+                                values={metrics?.commits || emptyVec}
+                                color="#ffd60a"
+                              />
+                            </div>
+                          );
+                        })()}
 
                         {/* Footer : last traffic snapshot date + viewsUniques for
                             audience quality signal. Kept subtle. */}
@@ -1523,7 +1835,7 @@ export default function GithubRoute() {
               </>
             );
           })()}
-        </Card>
+        </div>
       </Section>
     </div>
   );
@@ -1645,6 +1957,249 @@ function SyncBanner({
   );
 }
 
+/**
+ * Section icon — small stroke SVG sized to align with section-title
+ * baseline. Trophy for the leaderboard module ("Classement trafic"),
+ * grid for the catalog module ("Repos"). Inline so we don't drag a
+ * full icon library; both share the 16×16 viewBox + 1.5 stroke style
+ * already used elsewhere in the dashboard.
+ */
+function TrophyIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M4 2h8v3a4 4 0 0 1-8 0V2z" />
+      <path d="M4 4H2v1a2 2 0 0 0 2 2" />
+      <path d="M12 4h2v1a2 2 0 0 1-2 2" />
+      <path d="M8 9v3" />
+      <path d="M5.5 14h5" />
+      <path d="M6 12h4" />
+    </svg>
+  );
+}
+
+function GridIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="2" y="2" width="5" height="5" rx="1" />
+      <rect x="9" y="2" width="5" height="5" rx="1" />
+      <rect x="2" y="9" width="5" height="5" rx="1" />
+      <rect x="9" y="9" width="5" height="5" rx="1" />
+    </svg>
+  );
+}
+
+/**
+ * Inner content of a podium tile — extracted outside the .map callback
+ * so biome's useJsxKeyInIterable rule doesn't recurse into the
+ * fragment's children looking for keys (none of them are iterable; they
+ * sit inside a single rendered tile element). Pure presentational.
+ */
+function PodiumTileBody({
+  rank,
+  meta,
+  repoName,
+  values,
+  windowDays,
+  windowTotal,
+  cumulative,
+  recent14,
+  sort,
+  metric,
+  heroValue,
+  heroLabel,
+}: {
+  rank: number;
+  meta: { color: string; bg: string };
+  repoName: string;
+  values: number[];
+  windowDays: number;
+  windowTotal: number;
+  cumulative: number;
+  recent14: number;
+  sort: SparkSort;
+  metric: SparkMetric;
+  heroValue: number;
+  heroLabel: string;
+}) {
+  const stroke =
+    metric === 'clones'
+      ? '#30d158'
+      : metric === 'views'
+        ? '#64d2ff'
+        : metric === 'npm'
+          ? '#bf5af2'
+          : metric === 'pypi'
+            ? '#3776ab'
+            : '#dea584';
+  const path = sparklinePath(values, 220, 36);
+  return (
+    <>
+      <div className="flex items-center gap-2">
+        <span
+          aria-label={`Rank ${rank}`}
+          className="num inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-semibold tabular-nums"
+          style={{ background: meta.bg, color: meta.color }}
+        >
+          {rank}
+        </span>
+        <span className="truncate text-[14px] font-semibold text-[var(--text)]">{repoName}</span>
+      </div>
+      <div className="flex items-baseline gap-1.5">
+        <span
+          className="num text-[22px] font-semibold tabular-nums leading-none"
+          style={{ color: meta.color }}
+        >
+          {numberLabel(heroValue)}
+        </span>
+        <span className="text-[10px] uppercase tracking-[0.06em] text-[var(--text-faint)]">
+          {heroLabel}
+        </span>
+      </div>
+      <svg
+        viewBox="0 0 220 36"
+        className="h-9 w-full"
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        <path d={path} fill="none" stroke={stroke} strokeWidth={1.6} />
+      </svg>
+      <div className="flex items-center justify-between text-[10px] text-[var(--text-faint)]">
+        <span>14 j · {numberLabel(recent14)}</span>
+        <span>
+          {sort === 'window' ? 'Σ ' : `${windowDays}j `}
+          {numberLabel(sort === 'window' ? cumulative : windowTotal)}
+        </span>
+      </div>
+    </>
+  );
+}
+
+/**
+ * Top-3 podium for the traffic leaderboard. Replaces the previous
+ * "3 stacked thin rows" layout with proper celebratory tiles: medal
+ * circle + repo name + big number + full-width sparkline. Each tile
+ * has a top-border in the rank colour (gold / silver / bronze) so the
+ * podium reads instantly without legend hunting.
+ *
+ * Sits inside the leaderboard module above the secondary list (#4-#30).
+ */
+function RepoPodium({
+  rows,
+  metric,
+  sort,
+  windowDays,
+}: {
+  rows: Array<{
+    repoName: string;
+    repoUrl: string | null;
+    values: number[];
+    windowTotal: number;
+    cumulative: number;
+    recent14: number;
+    lastDate: string | null;
+  }>;
+  metric: SparkMetric;
+  sort: SparkSort;
+  windowDays: number;
+}) {
+  const stroke =
+    metric === 'clones'
+      ? '#30d158'
+      : metric === 'views'
+        ? '#64d2ff'
+        : metric === 'npm'
+          ? '#bf5af2'
+          : metric === 'pypi'
+            ? '#3776ab'
+            : '#dea584';
+  // Rank palette — Olympic-conventional gold/silver/bronze with enough
+  // contrast against the dark surface to read the medal number cleanly.
+  const RANK = [
+    { color: '#ffd60a', bg: 'rgba(255,214,10,0.10)', label: 'Or' },
+    { color: '#c0c0c0', bg: 'rgba(192,192,192,0.10)', label: 'Argent' },
+    { color: '#cd7f32', bg: 'rgba(205,127,50,0.10)', label: 'Bronze' },
+  ];
+
+  return (
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+      {rows.slice(0, 3).map((row, idx) => {
+        const rank = idx + 1;
+        const meta = RANK[idx];
+        const heroValue = sort === 'window' ? row.windowTotal : row.cumulative;
+        const heroLabel = sort === 'window' ? `${windowDays} j` : 'Σ all-time';
+        const tileClass =
+          'flex h-full flex-col gap-2 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2.5 transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-2)]';
+        const tileStyle = { borderTop: `3px solid ${meta.color}` };
+        // PodiumTileBody is rendered inline in both branches (instead of
+        // assigned to a const above) so biome's useJsxKeyInIterable rule
+        // doesn't recurse into the const looking for keys it doesn't need.
+        return row.repoUrl ? (
+          <a
+            key={row.repoName}
+            href={row.repoUrl}
+            target="_blank"
+            rel="noreferrer"
+            className={tileClass}
+            style={tileStyle}
+          >
+            <PodiumTileBody
+              rank={rank}
+              meta={meta}
+              repoName={row.repoName}
+              values={row.values}
+              windowDays={windowDays}
+              windowTotal={row.windowTotal}
+              cumulative={row.cumulative}
+              recent14={row.recent14}
+              sort={sort}
+              metric={metric}
+              heroValue={heroValue}
+              heroLabel={heroLabel}
+            />
+          </a>
+        ) : (
+          <div key={row.repoName} className={tileClass} style={tileStyle}>
+            <PodiumTileBody
+              rank={rank}
+              meta={meta}
+              repoName={row.repoName}
+              values={row.values}
+              windowDays={windowDays}
+              windowTotal={row.windowTotal}
+              cumulative={row.cumulative}
+              recent14={row.recent14}
+              sort={sort}
+              metric={metric}
+              heroValue={heroValue}
+              heroLabel={heroLabel}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function RepoSparklineCard({
   rank,
   repoName,
@@ -1673,7 +2228,16 @@ function RepoSparklineCard({
   const width = 80;
   const height = 20;
   const path = sparklinePath(values, width, height);
-  const stroke = metric === 'clones' ? '#30d158' : '#64d2ff';
+  const stroke =
+    metric === 'clones'
+      ? '#30d158'
+      : metric === 'views'
+        ? '#64d2ff'
+        : metric === 'npm'
+          ? '#bf5af2'
+          : metric === 'pypi'
+            ? '#3776ab'
+            : '#dea584';
   const tooltip = `#${rank} · ${repoName} · ${metric} · ${windowDays}d ${windowTotal} · 14d ${recent14} · Σ ${cumulative}${lastDate ? ` · ${lastDate}` : ''}`;
   // Highlight the top 3 ranks visually — aligns with the “leaderboard” intent
   // that was previously carried by the Top clones cumulés section.

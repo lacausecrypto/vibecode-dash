@@ -1,5 +1,7 @@
 import { loadSettings } from '../config';
 import { getDb } from '../db';
+import { refreshNpmDownloads } from '../lib/npmDownloads';
+import { refreshAllPackageDownloads } from '../lib/packageDownloads';
 import { expireStaleDrafts } from '../lib/presence';
 import { refreshPersonaAntiPatterns } from '../lib/presencePersona';
 import { refreshAllSourceHealth } from '../lib/sourceHealth';
@@ -80,6 +82,37 @@ export async function startScheduler(): Promise<void> {
       run: async () => {
         const live = await loadSettings();
         await syncGithubAll(db, live.github.username);
+      },
+    },
+    {
+      // npm download sync — run on a 6 h cadence. The registry refreshes
+      // its /downloads/range data ~once per day (UTC), so polling more
+      // often is wasted bandwidth; less often delays the cumul chart.
+      // Writes `last_npm_sync` in kv so the GitHub page sync bar shows
+      // the freshness pill the same way it does for heatmap/repos/traffic.
+      name: 'npm_sync',
+      intervalMs: 6 * 60 * 60 * 1000,
+      run: async () => {
+        await refreshNpmDownloads({ db, force: false });
+        db.query('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)').run(
+          'last_npm_sync',
+          String(Math.floor(Date.now() / 1000)),
+        );
+      },
+    },
+    {
+      // Multi-registry download sync (PyPI, crates.io, RubyGems) for
+      // every GitHub repo that's also a scanned local project. Each
+      // adapter detects whether the project is published on its registry
+      // by sniffing the local manifest (pyproject.toml / Cargo.toml /
+      // *.gemspec) — projects not published to a registry are
+      // memoised as "not_found" so they don't get re-checked every tick.
+      // Same 6 h cadence as npm — public registry APIs are gentle but
+      // there's no point hitting them more often than they update.
+      name: 'package_downloads_sync',
+      intervalMs: 6 * 60 * 60 * 1000,
+      run: async () => {
+        await refreshAllPackageDownloads({ db, force: false });
       },
     },
     {

@@ -268,6 +268,22 @@ function numberLabel(value: number): string {
   return Intl.NumberFormat(numberLocale(currentLocale())).format(Math.round(value));
 }
 
+/**
+ * Compact number formatter (1234567 → "1,2 M") used by the KPI strip
+ * where headline numbers must fit in narrow pills. Below 1 000 we keep
+ * the locale integer formatting so small values read normally.
+ */
+function compactNumberLabel(value: number): string {
+  const rounded = Math.round(value);
+  if (Math.abs(rounded) < 1000) {
+    return Intl.NumberFormat(numberLocale(currentLocale())).format(rounded);
+  }
+  return Intl.NumberFormat(numberLocale(currentLocale()), {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(rounded);
+}
+
 function percentLabel(value: number): string {
   return `${value.toFixed(1)}%`;
 }
@@ -1121,6 +1137,33 @@ export default function UsageRoute() {
           <h2 className="section-title">{t('usage.title')}</h2>
           <div className="section-meta">{t('usage.headerMeta')}</div>
         </div>
+        {/* Coverage pastille — moved out of the KPI strip (where it ate a
+            full card for a 1-bit signal). Tooltip carries the diagnostic
+            counts (JSONL files / messages) the user only checks when
+            something looks wrong. */}
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] ${
+            hasCombinedData
+              ? 'border-[rgba(48,209,88,0.32)] bg-[rgba(48,209,88,0.08)] text-[#a8e6b8]'
+              : 'border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-mute)]'
+          }`}
+          title={
+            jsonlMeta
+              ? `${t('usage.metricLines.jsonlFiles')}: ${jsonlMeta.filesScanned} · ${t('usage.metricLines.jsonlMessages')}: ${numberLabel(jsonlMeta.assistantMessages + jsonlMeta.userMessages)}`
+              : undefined
+          }
+        >
+          <span
+            aria-hidden="true"
+            className={`h-1.5 w-1.5 rounded-full ${hasCombinedData ? 'bg-[#30d158]' : 'bg-[var(--text-faint)]'}`}
+          />
+          {t('usage.metrics.coverageShort')}{' '}
+          {hasCombinedData ? (
+            t('usage.metricLines.daysCount', { n: chartData.length })
+          ) : (
+            <span>{t('common.empty')}</span>
+          )}
+        </span>
       </div>
 
       {error ? (
@@ -1165,71 +1208,15 @@ export default function UsageRoute() {
         <span className="text-[10.5px] text-[var(--text-faint)]">{t('usage.scopeBand.hint')}</span>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 xl:grid-cols-4">
-        <ProviderSummaryCard
-          title="Claude"
-          tone="cyan"
-          lens={tokenLens}
-          selectedTokens={tokenLens === 'all' ? totals.claudeAllTokens : totals.claudeActiveTokens}
-          activeTokens={totals.claudeActiveTokens}
-          cacheTokens={totals.claudeCacheTokens}
-          cost={totals.claudeCost}
-          tokenShare={claudeTokenShare}
-          costShare={claudeCostShare}
-        />
-
-        <ProviderSummaryCard
-          title="Codex"
-          tone="amber"
-          lens={tokenLens}
-          selectedTokens={tokenLens === 'all' ? totals.codexAllTokens : totals.codexActiveTokens}
-          activeTokens={totals.codexActiveTokens}
-          cacheTokens={totals.codexCacheTokens}
-          cost={totals.codexCost}
-          tokenShare={codexTokenShare}
-          costShare={codexCostShare}
-        />
-
-        <MetricCard
-          title={t('usage.metrics.totalTokens')}
-          value={numberLabel(totals.totalSelectedTokens)}
-        >
-          <MetricLine
-            label={providerTokenTitle(tokenLens)}
-            value={numberLabel(totals.totalSelectedTokens)}
-          />
-          <MetricLine
-            label={t('usage.metricLines.totalCost')}
-            value={currencyLabel(totals.totalCost)}
-          />
-          <MetricLine label={t('common.days')} value={String(chartData.length)} />
-        </MetricCard>
-
-        <MetricCard
-          title={t('usage.metrics.coverage')}
-          value={hasCombinedData ? 'OK' : t('common.empty')}
-          valueTone="text-emerald-200"
-        >
-          <MetricLine
-            label={t('usage.metricLines.combinedDaily')}
-            value={
-              hasCombinedData
-                ? t('usage.metricLines.daysCount', { n: chartData.length })
-                : t('usage.metricLines.noLine')
-            }
-          />
-          <MetricLine
-            label={t('usage.metricLines.jsonlFiles')}
-            value={jsonlMeta ? String(jsonlMeta.filesScanned) : 'n/a'}
-          />
-          <MetricLine
-            label={t('usage.metricLines.jsonlMessages')}
-            value={
-              jsonlMeta ? numberLabel(jsonlMeta.assistantMessages + jsonlMeta.userMessages) : 'n/a'
-            }
-          />
-        </MetricCard>
-      </div>
+      <KpiStrip
+        totals={totals}
+        tokenLens={tokenLens}
+        days={chartData.length}
+        claudeTokenShare={claudeTokenShare}
+        codexTokenShare={codexTokenShare}
+        claudeCostShare={claudeCostShare}
+        codexCostShare={codexCostShare}
+      />
 
       {/* Merged module: calendar heatmap (Grille) + cumulative stacked bars
           per provider (Cumul). The cumul view absorbs the former "Volume
@@ -1240,12 +1227,19 @@ export default function UsageRoute() {
         title={t('usage.metrics.heatmapUsage')}
         subtitle={
           heatmapView === 'grid'
-            ? `${t('usage.filters.source')}: ${heatmapSourceLabel(heatmapSource)} · ${providerTokenTitle(tokenLens)}`
+            ? providerTokenTitle(tokenLens)
             : heatmapMetric === 'tokens'
               ? providerTokenTitle(tokenLens)
               : t('usage.heatmap.metricCostSubtitle')
         }
       >
+        {/* All controls on a single wrapped toolbar — was 1 row of view-
+            toggle + a separate stacked block of 4 LabeledSelects + a row
+            of redundant ui-chips. Switching every control to Segmented
+            saves ~80 px vertical and the visibleDays / threshold /
+            scaleLabel chips were just echoing the selectors above. The
+            visibleDays counter (n/total) is folded into the Heatmap
+            component's own total-line render, so no info is lost. */}
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <Segmented
             value={heatmapView}
@@ -1255,7 +1249,42 @@ export default function UsageRoute() {
             ]}
             onChange={(value) => setHeatmapView(value as 'grid' | 'cumul')}
           />
-          {heatmapView === 'cumul' ? (
+          {heatmapView === 'grid' ? (
+            <>
+              <Segmented
+                value={heatmapSource}
+                options={HEATMAP_KEYS.map((k) => ({
+                  value: k,
+                  label: t(`usage.heatmapSource.${k}`),
+                }))}
+                onChange={(value) => setHeatmapSource(value as HeatmapSource)}
+              />
+              <Segmented
+                value={heatmapDayFilter}
+                options={HEATMAP_DAY_KEYS.map((k) => ({
+                  value: k,
+                  label: t(`usage.heatmapDayFilter.${k}`),
+                }))}
+                onChange={(value) => setHeatmapDayFilter(value as HeatmapDayFilter)}
+              />
+              <Segmented
+                value={heatmapIntensity}
+                options={HEATMAP_INTENSITY_KEYS.map((k) => ({
+                  value: k,
+                  label: t(`usage.heatmapIntensity.${k}`),
+                }))}
+                onChange={(value) => setHeatmapIntensity(value as HeatmapIntensityFilter)}
+              />
+              <Segmented
+                value={heatmapScale}
+                options={HEATMAP_SCALE_KEYS.map((k) => ({
+                  value: k,
+                  label: t(`usage.heatmapScale.${k}`),
+                }))}
+                onChange={(value) => setHeatmapScale(value as HeatmapScale)}
+              />
+            </>
+          ) : (
             <>
               <Segmented
                 value={heatmapMetric}
@@ -1277,75 +1306,11 @@ export default function UsageRoute() {
                 onChange={(value) => setHeatmapBucket(value as GroupBy)}
               />
             </>
-          ) : null}
+          )}
         </div>
 
         {heatmapView === 'grid' ? (
           <>
-            <div className="mb-3 flex flex-wrap items-end gap-3">
-              <LabeledSelect
-                label={t('usage.filters.source')}
-                value={heatmapSource}
-                options={HEATMAP_KEYS.map((k) => ({
-                  value: k,
-                  label: t(`usage.heatmapSource.${k}`),
-                }))}
-                onChange={(value) => setHeatmapSource(value as HeatmapSource)}
-              />
-              <LabeledSelect
-                label={t('usage.filters.dayFilter')}
-                value={heatmapDayFilter}
-                options={HEATMAP_DAY_KEYS.map((k) => ({
-                  value: k,
-                  label: t(`usage.heatmapDayFilter.${k}`),
-                }))}
-                onChange={(value) => setHeatmapDayFilter(value as HeatmapDayFilter)}
-              />
-              <LabeledSelect
-                label={t('usage.filters.intensity')}
-                value={heatmapIntensity}
-                options={HEATMAP_INTENSITY_KEYS.map((k) => ({
-                  value: k,
-                  label: t(`usage.heatmapIntensity.${k}`),
-                }))}
-                onChange={(value) => setHeatmapIntensity(value as HeatmapIntensityFilter)}
-              />
-              <LabeledSelect
-                label={t('usage.filters.scale')}
-                value={heatmapScale}
-                options={HEATMAP_SCALE_KEYS.map((k) => ({
-                  value: k,
-                  label: t(`usage.heatmapScale.${k}`),
-                }))}
-                onChange={(value) => setHeatmapScale(value as HeatmapScale)}
-              />
-            </div>
-
-            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-              <span className="ui-chip">
-                {t('usage.filters.visibleDays', {
-                  visible: heatmapModel.visibleDays,
-                  total: heatmapModel.scopedDays,
-                })}
-              </span>
-              <span className="ui-chip">
-                {t('usage.filters.threshold', {
-                  value:
-                    heatmapIntensity === 'all'
-                      ? t('usage.filters.thresholdNone')
-                      : numberLabel(heatmapModel.threshold),
-                })}
-              </span>
-              <span className="ui-chip">
-                {t('usage.filters.scaleLabel', {
-                  value:
-                    heatmapScale === 'log'
-                      ? t('usage.filters.scaleLog')
-                      : t('usage.filters.scaleLinear'),
-                })}
-              </span>
-            </div>
-
             {heatmapModel.days.length === 0 ? (
               <EmptyBlock message={t('usage.filters.emptyHeatmap')} />
             ) : (
@@ -1581,83 +1546,203 @@ function SourceBadge({
   );
 }
 
-function ProviderSummaryCard({
-  title,
+/**
+ * Compact 8-KPI strip — replaces the 4 fat cards (Claude / Codex /
+ * Total / Coverage) that ate ~180 px desktop / ~720 px mobile for
+ * 16 numbers with heavy redundancies (`cost` shown 3×, `active tokens`
+ * shown 3×, `days` shown 2×).
+ *
+ * Layout:
+ *   - Row 1: 4 pills — Total tokens, Cost, Days, Cache hit %
+ *   - Row 2: 2 provider rows — Claude (cyan) + Codex (amber), each with
+ *     tokens · cost · share %, and a split-bar visualising the share.
+ *
+ * Coverage status migrated to a pastille on the page header (the strip
+ * is for KPIs, not status).
+ */
+function KpiStrip({
+  totals,
+  tokenLens,
+  days,
+  claudeTokenShare,
+  codexTokenShare,
+  claudeCostShare,
+  codexCostShare,
+}: {
+  totals: {
+    claudeActiveTokens: number;
+    claudeCacheTokens: number;
+    claudeAllTokens: number;
+    codexActiveTokens: number;
+    codexCacheTokens: number;
+    codexAllTokens: number;
+    totalActiveTokens: number;
+    totalAllTokens: number;
+    totalSelectedTokens: number;
+    totalCost: number;
+    claudeCost: number;
+    codexCost: number;
+  };
+  tokenLens: TokenLens;
+  days: number;
+  claudeTokenShare: number;
+  codexTokenShare: number;
+  claudeCostShare: number;
+  codexCostShare: number;
+}) {
+  const { t } = useTranslation();
+  // Cache hit ratio — newly surfaced metric: how much of total token
+  // volume came from the prompt cache (read or write). Higher = better
+  // ROI on the cache. `cacheRatio` is bounded to [0,1].
+  const totalCache = totals.claudeCacheTokens + totals.codexCacheTokens;
+  const totalTokensWithCache = totals.totalActiveTokens + totalCache;
+  const cacheHitPct =
+    totalTokensWithCache > 0 ? Math.round((totalCache / totalTokensWithCache) * 100) : 0;
+  const claudeSelected = tokenLens === 'all' ? totals.claudeAllTokens : totals.claudeActiveTokens;
+  const codexSelected = tokenLens === 'all' ? totals.codexAllTokens : totals.codexActiveTokens;
+  return (
+    <div className="flex flex-col gap-2">
+      {/* Row 1: 4 headline KPIs. 2-col mobile, 4-col ≥ sm. */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <KpiPill
+          label={t('usage.metrics.totalTokens')}
+          value={compactNumberLabel(totals.totalSelectedTokens)}
+          sub={providerTokenTitle(tokenLens)}
+        />
+        <KpiPill
+          label={t('usage.metricLines.totalCost')}
+          value={currencyLabel(totals.totalCost)}
+          sub={t('usage.kpiStrip.costPaygSub')}
+        />
+        <KpiPill
+          label={t('usage.kpiStrip.daysLabel')}
+          value={String(days)}
+          sub={t('usage.kpiStrip.daysSub')}
+        />
+        <KpiPill
+          label={t('usage.kpiStrip.cacheHitLabel')}
+          value={`${cacheHitPct}%`}
+          sub={compactNumberLabel(totalCache)}
+          tone={cacheHitPct >= 70 ? 'success' : cacheHitPct >= 40 ? 'accent' : 'neutral'}
+        />
+      </div>
+
+      {/* Row 2: provider split with a mini share bar between Claude and
+          Codex. Each side shows tokens · cost · share %. Stacks to 1-col
+          on mobile, side-by-side ≥ sm. */}
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <ProviderRow
+          label="Claude"
+          tone="cyan"
+          tokens={claudeSelected}
+          cost={totals.claudeCost}
+          tokenShare={claudeTokenShare}
+          costShare={claudeCostShare}
+        />
+        <ProviderRow
+          label="Codex"
+          tone="amber"
+          tokens={codexSelected}
+          cost={totals.codexCost}
+          tokenShare={codexTokenShare}
+          costShare={codexCostShare}
+        />
+      </div>
+    </div>
+  );
+}
+
+function KpiPill({
+  label,
+  value,
+  sub,
+  tone = 'neutral',
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: 'neutral' | 'success' | 'accent';
+}) {
+  const valueClass =
+    tone === 'success'
+      ? 'text-[#30d158]'
+      : tone === 'accent'
+        ? 'text-[#64d2ff]'
+        : 'text-[var(--text)]';
+  return (
+    <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface-1)] px-3 py-2">
+      <div className="truncate text-[10px] uppercase tracking-[0.08em] text-[var(--text-dim)]">
+        {label}
+      </div>
+      <div className={`num text-[18px] font-semibold tracking-tight sm:text-[20px] ${valueClass}`}>
+        {value}
+      </div>
+      {sub ? <div className="truncate text-[10.5px] text-[var(--text-faint)]">{sub}</div> : null}
+    </div>
+  );
+}
+
+function ProviderRow({
+  label,
   tone,
-  lens,
-  selectedTokens,
-  activeTokens,
-  cacheTokens,
+  tokens,
   cost,
   tokenShare,
   costShare,
 }: {
-  title: string;
+  label: string;
   tone: ProviderTone;
-  lens: TokenLens;
-  selectedTokens: number;
-  activeTokens: number;
-  cacheTokens: number;
+  tokens: number;
   cost: number;
   tokenShare: number;
   costShare: number;
 }) {
-  const { t } = useTranslation();
   const accent =
     tone === 'cyan'
-      ? { value: 'text-[#64d2ff]', border: 'border-[rgba(100,210,255,0.28)]' }
-      : { value: 'text-[#ffd60a]', border: 'border-[rgba(255,214,10,0.28)]' };
-
+      ? { text: 'text-[#64d2ff]', bar: '#64d2ff', border: 'border-[rgba(100,210,255,0.32)]' }
+      : { text: 'text-[#ffd60a]', bar: '#ffd60a', border: 'border-[rgba(255,214,10,0.32)]' };
+  // Token-share drives the bar fill: visually, "how much of the total
+  // token volume this provider owns". Cost share is shown as a small
+  // numeric annotation since it can diverge from token share when one
+  // provider's per-token price is heavier (e.g. opus vs gpt-5-mini).
+  const sharePct = Math.max(2, Math.round(tokenShare * 100));
   return (
-    <div className={`rounded-[var(--radius-lg)] border ${accent.border} bg-[var(--surface-1)] p-4`}>
-      <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">{title}</div>
-      <div
-        className={`mt-1 text-[22px] font-semibold tracking-tight num sm:text-[26px] ${accent.value}`}
-      >
-        {numberLabel(selectedTokens)}
+    <div
+      className={`rounded-[var(--radius)] border ${accent.border} bg-[var(--surface-1)] px-3 py-2`}
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+        <div className="flex items-baseline gap-2 min-w-0">
+          <span
+            aria-hidden="true"
+            className="h-1.5 w-1.5 shrink-0 rounded-full"
+            style={{ backgroundColor: accent.bar }}
+          />
+          <span className={`text-[12.5px] font-medium ${accent.text}`}>{label}</span>
+          <span className="num text-[14px] font-semibold tracking-tight text-[var(--text)]">
+            {compactNumberLabel(tokens)}
+          </span>
+          <span className="text-[11px] text-[var(--text-mute)]">·</span>
+          <span className="num text-[12px] text-[var(--text-mute)]">{currencyLabel(cost)}</span>
+        </div>
+        <div className="flex items-baseline gap-2 text-[11px] text-[var(--text-faint)]">
+          <span className="num">
+            <span className={accent.text}>{Math.round(tokenShare * 100)}%</span> tok
+          </span>
+          <span>·</span>
+          <span className="num">
+            <span className={accent.text}>{Math.round(costShare * 100)}%</span> $
+          </span>
+        </div>
       </div>
-      <div className="mt-0.5 text-[12px] text-[var(--text-dim)]">{providerTokenTitle(lens)}</div>
-
-      <div className="mt-3 flex flex-col gap-1">
-        <MetricLine label={t('usage.metricLines.active')} value={numberLabel(activeTokens)} />
-        <MetricLine label={t('usage.metricLines.cache')} value={numberLabel(cacheTokens)} />
-        <MetricLine label={t('usage.metricLines.cost')} value={currencyLabel(cost)} />
-        <MetricLine label={t('usage.metricLines.tokenShare')} value={percentLabel(tokenShare)} />
-        <MetricLine label={t('usage.metricLines.costShare')} value={percentLabel(costShare)} />
+      {/* Share bar: simple horizontal fill with the provider tone.
+          Reads as "this CLI owns N% of the period's tokens". */}
+      <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-[var(--surface-2)]">
+        <div
+          className="h-full"
+          style={{ width: `${sharePct}%`, backgroundColor: accent.bar }}
+          aria-hidden="true"
+        />
       </div>
-    </div>
-  );
-}
-
-function MetricCard({
-  title,
-  value,
-  valueTone,
-  children,
-}: {
-  title: string;
-  value: string;
-  valueTone?: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-1)] p-4">
-      <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-dim)]">{title}</div>
-      <div
-        className={`mt-1 text-[22px] font-semibold tracking-tight num sm:text-[26px] ${valueTone || 'text-[#30d158]'}`}
-      >
-        {value}
-      </div>
-      <div className="mt-3 flex flex-col gap-1">{children}</div>
-    </div>
-  );
-}
-
-function MetricLine({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-2 text-[12px]">
-      <span className="text-[var(--text-dim)]">{label}</span>
-      <span className="num text-[var(--text-mute)]">{value}</span>
     </div>
   );
 }

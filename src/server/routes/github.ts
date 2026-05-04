@@ -18,6 +18,12 @@ type GithubStatusSnapshot = {
   heatmapLastSync: number | null;
   reposLastSync: number | null;
   trafficLastSync: number | null;
+  // Package-registry sync timestamps powering the sync-bar pills.
+  // Each is null until the first scheduler tick writes the kv key.
+  npmLastSync: number | null;
+  pypiLastSync: number | null;
+  cratesLastSync: number | null;
+  rubygemsLastSync: number | null;
 };
 
 function kvNumber(db: Database, key: string): number | null {
@@ -62,6 +68,10 @@ function snapshot(db: Database): GithubStatusSnapshot {
     heatmapLastSync: kvNumber(db, 'last_github_heatmap_sync'),
     reposLastSync: kvNumber(db, 'last_github_repos_sync'),
     trafficLastSync: kvNumber(db, 'last_github_traffic_sync'),
+    npmLastSync: kvNumber(db, 'last_npm_sync'),
+    pypiLastSync: kvNumber(db, 'last_pypi_sync'),
+    cratesLastSync: kvNumber(db, 'last_crates_sync'),
+    rubygemsLastSync: kvNumber(db, 'last_rubygems_sync'),
   };
 }
 
@@ -215,6 +225,40 @@ export function registerGithubRoutes(app: Hono): void {
   app.get('/api/github/status', (c) => {
     const db = getDb();
     return c.json(snapshot(db));
+  });
+
+  /**
+   * Last N commits for a single repo, newest first. Powers the
+   * "Recent commits" section of the per-project GitHub sub-page.
+   * `:name` is matched case-insensitively against github_repos.name
+   * (the same case as stored on GitHub) — projects use the same key.
+   * Returns empty array if the repo is unknown locally; never 404, so
+   * the page can render a graceful empty state without a special branch.
+   */
+  app.get('/api/github/repos/:name/commits', (c) => {
+    const db = getDb();
+    const name = c.req.param('name');
+    const limit = Math.min(200, Math.max(1, Number.parseInt(c.req.query('limit') || '30', 10)));
+    const rows = db
+      .query<
+        {
+          sha: string;
+          repo: string;
+          date: number;
+          message: string | null;
+          additions: number | null;
+          deletions: number | null;
+        },
+        [string, number]
+      >(
+        `SELECT sha, repo, date, message, additions, deletions
+           FROM github_commits
+          WHERE LOWER(repo) = LOWER(?)
+          ORDER BY date DESC
+          LIMIT ?`,
+      )
+      .all(name, limit);
+    return c.json({ rows });
   });
 
   app.get('/api/github/repos', (c) => {
@@ -563,27 +607,30 @@ export function registerGithubRoutes(app: Hono): void {
     const reposList = db
       .query<{ name: string }, []>('SELECT name FROM github_repos ORDER BY name ASC')
       .all();
-    const perRepo = new Map<
-      string,
-      { views: number[]; clones: number[]; commits: number[]; npm: number[] }
-    >();
+    type RepoBucket = {
+      views: number[];
+      clones: number[];
+      commits: number[];
+      npm: number[];
+      pypi: number[];
+      cargo: number[];
+    };
+    const seedBucket = (): RepoBucket => ({
+      views: new Array(days).fill(0),
+      clones: new Array(days).fill(0),
+      commits: new Array(days).fill(0),
+      npm: new Array(days).fill(0),
+      pypi: new Array(days).fill(0),
+      cargo: new Array(days).fill(0),
+    });
+    const perRepo = new Map<string, RepoBucket>();
     for (const r of reposList) {
-      perRepo.set(r.name, {
-        views: new Array(days).fill(0),
-        clones: new Array(days).fill(0),
-        commits: new Array(days).fill(0),
-        npm: new Array(days).fill(0),
-      });
+      perRepo.set(r.name, seedBucket());
     }
     const ensure = (repo: string) => {
       let v = perRepo.get(repo);
       if (!v) {
-        v = {
-          views: new Array(days).fill(0),
-          clones: new Array(days).fill(0),
-          commits: new Array(days).fill(0),
-          npm: new Array(days).fill(0),
-        };
+        v = seedBucket();
         perRepo.set(repo, v);
       }
       return v;
@@ -606,16 +653,25 @@ export function registerGithubRoutes(app: Hono): void {
       bucket.clones[idx] += Number(row.c || 0);
     }
 
+    // github_commits.date is INTEGER unix seconds (cf. migration 0012),
+    // so we filter via a unix int cutoff and project an ISO day with
+    // strftime to align with `dateIndex`. Without this the WHERE compares
+    // an int to an ISO string (passes everything via numeric coercion)
+    // and every commit lands in its own per-second bucket, so the lookup
+    // misses and the column reads as zero everywhere.
+    const cutoffSec = Math.floor(startMs / 1000);
     const commitRows = db
-      .query<{ repo: string; date: string; n: number }, [string]>(
-        `SELECT repo, date, COUNT(*) AS n
+      .query<{ repo: string; day: string; n: number }, [number]>(
+        `SELECT repo,
+                strftime('%Y-%m-%d', date, 'unixepoch') AS day,
+                COUNT(*) AS n
          FROM github_commits
          WHERE date >= ?
-         GROUP BY repo, date`,
+         GROUP BY repo, day`,
       )
-      .all(cutoff);
+      .all(cutoffSec);
     for (const row of commitRows) {
-      const idx = dateIndex.get(row.date);
+      const idx = dateIndex.get(row.day);
       if (idx === undefined) continue;
       ensure(row.repo).commits[idx] = Number(row.n || 0);
     }
@@ -633,14 +689,101 @@ export function registerGithubRoutes(app: Hono): void {
       ensure(row.repo_name).npm[idx] = Number(row.downloads || 0);
     }
 
+    // PyPI + Cargo (and any future registry) live in the generic
+    // package_downloads_daily table, keyed by (registry, repo, date).
+    // Two separate queries instead of one with a CASE so each fills its
+    // own typed bucket; the cost is negligible given the table is
+    // indexed on registry + repo.
+    const pypiRows = db
+      .query<{ repo_name: string; date: string; downloads: number }, [string, string]>(
+        `SELECT repo_name, date, downloads
+         FROM package_downloads_daily
+         WHERE registry = ? AND date >= ?`,
+      )
+      .all('pypi', cutoff);
+    for (const row of pypiRows) {
+      const idx = dateIndex.get(row.date);
+      if (idx === undefined) continue;
+      ensure(row.repo_name).pypi[idx] = Number(row.downloads || 0);
+    }
+
+    const cratesRows = db
+      .query<{ repo_name: string; date: string; downloads: number }, [string, string]>(
+        `SELECT repo_name, date, downloads
+         FROM package_downloads_daily
+         WHERE registry = ? AND date >= ?`,
+      )
+      .all('crates', cutoff);
+    for (const row of cratesRows) {
+      const idx = dateIndex.get(row.date);
+      if (idx === undefined) continue;
+      ensure(row.repo_name).cargo[idx] = Number(row.downloads || 0);
+    }
+
     const result = [...perRepo.entries()].map(([repo, v]) => ({
       repo,
       views: v.views,
       clones: v.clones,
       commits: v.commits,
       npm: v.npm,
+      pypi: v.pypi,
+      cargo: v.cargo,
     }));
     return c.json({ days, cutoff, dates, repos: result });
+  });
+
+  /**
+   * Per-day per-repo PyPI downloads — symmetric to /npm/daily-by-repo,
+   * feeds the cumul stacked-bars view + the heatmap when the user
+   * picks the "PyPI" metric. Window: ?days=N (default 120, max 365).
+   * Source table: package_downloads_daily filtered by registry='pypi'.
+   * Future-dated rows are filtered out (mirrors the npm endpoint —
+   * registries occasionally publish T+1 zero rows due to timezone seams).
+   */
+  app.get('/api/github/pypi/daily-by-repo', (c) => {
+    const db = getDb();
+    const days = Math.min(365, Math.max(1, Number.parseInt(c.req.query('days') || '120', 10)));
+    const now = new Date();
+    const cutoff = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)),
+    )
+      .toISOString()
+      .slice(0, 10);
+    const todayUtc = now.toISOString().slice(0, 10);
+    const rows = db
+      .query<{ date: string; repo: string; downloads: number }, [string, string, string]>(
+        `SELECT date, repo_name AS repo, downloads
+           FROM package_downloads_daily
+          WHERE registry = ? AND date >= ? AND date <= ?
+          ORDER BY date DESC, downloads DESC`,
+      )
+      .all('pypi', cutoff, todayUtc);
+    return c.json({ rows });
+  });
+
+  /**
+   * Per-day per-repo crates.io downloads — same shape as npm/pypi.
+   * Source: package_downloads_daily filtered by registry='crates'.
+   */
+  app.get('/api/github/crates/daily-by-repo', (c) => {
+    const db = getDb();
+    const days = Math.min(365, Math.max(1, Number.parseInt(c.req.query('days') || '120', 10)));
+    const now = new Date();
+    const cutoff = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)),
+    )
+      .toISOString()
+      .slice(0, 10);
+    const todayUtc = now.toISOString().slice(0, 10);
+    const rows = db
+      .query<{ date: string; repo: string; downloads: number }, [string, string, string]>(
+        `SELECT date, repo_name AS repo, downloads
+           FROM package_downloads_daily
+          WHERE registry = ? AND date >= ? AND date <= ?
+          ORDER BY date DESC, downloads DESC`,
+      )
+      .all('crates', cutoff, todayUtc);
+    return c.json({ rows });
   });
 
   app.post('/api/github/sync', async (c) => {
@@ -671,7 +814,12 @@ export function registerGithubRoutes(app: Hono): void {
         delta.heatmapTotalDelta !== 0 ||
         delta.latestTrafficDateChanged;
 
-      const status = result.trafficErrors > 0 ? 'partial' : hasChange ? 'ok' : 'no-change';
+      const status =
+        result.trafficErrors > 0 || result.commitErrors > 0
+          ? 'partial'
+          : hasChange
+            ? 'ok'
+            : 'no-change';
       recordSyncEvent(db, {
         kind: 'github-all',
         trigger: 'manual',
@@ -683,6 +831,9 @@ export function registerGithubRoutes(app: Hono): void {
             trafficRepos: result.trafficRepos,
             trafficDays: result.trafficDays,
             trafficErrors: result.trafficErrors,
+            commitRepos: result.commitRepos,
+            commits: result.commits,
+            commitErrors: result.commitErrors,
           },
           delta,
         },
@@ -695,6 +846,9 @@ export function registerGithubRoutes(app: Hono): void {
           trafficRepos: result.trafficRepos,
           trafficDays: result.trafficDays,
           trafficErrors: result.trafficErrors,
+          commitRepos: result.commitRepos,
+          commits: result.commits,
+          commitErrors: result.commitErrors,
         },
         delta,
         hasChange,
