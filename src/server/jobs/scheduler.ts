@@ -112,7 +112,17 @@ export async function startScheduler(): Promise<void> {
       name: 'package_downloads_sync',
       intervalMs: 6 * 60 * 60 * 1000,
       run: async () => {
-        await refreshAllPackageDownloads({ db, force: false });
+        // Re-read settings each tick so alias edits take effect on the
+        // next sync without a server restart. displayAliases bridges
+        // GitHub repo names to local project paths when the user has
+        // renamed a folder or split repo/local naming (e.g. local
+        // `Dashboard` ↔ GitHub `vibecode-dash`).
+        const live = await loadSettings();
+        await refreshAllPackageDownloads({
+          db,
+          force: false,
+          displayAliases: live.displayAliases,
+        });
       },
     },
     {

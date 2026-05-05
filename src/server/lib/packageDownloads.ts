@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /**
@@ -52,8 +52,12 @@ export type RegistryAdapter = {
    * name on this registry, or null if the project isn't published here.
    * Pure file-system inspection — no network calls. Fast enough to run
    * synchronously per repo on every refresh.
+   *
+   * `repoName` is provided so adapters can pick between siblings in
+   * polyglot layouts (e.g. a Cargo workspace with multiple crates —
+   * we prefer the one matching the repo or its `-cli` variant).
    */
-  detectPackageName(projectPath: string): Promise<string | null>;
+  detectPackageName(projectPath: string, repoName: string): Promise<string | null>;
   /** Point counts; returns null when the registry says "not found". */
   fetchPoint(packageName: string): Promise<PackagePoint | null>;
   /** Daily downloads for the last N days (registry-capped, often 365). */
@@ -133,18 +137,22 @@ async function safeJson<T>(url: string): Promise<T | null> {
  * pyproject.toml is the canonical PEP 621 spec — `[project] name`.
  * setup.py fallback uses a regex on `setup(name="…")`; not robust to
  * computed names (rare in real projects).
+ *
+ * Polyglot repos that bundle a Python sub-package (e.g. mcp-wallfacer
+ * with its `pip/pyproject.toml`) keep the manifest in a sub-dir. We
+ * try the root first, then a short list of conventional locations,
+ * before walking `packages/*` (one level only — full recursion would
+ * pull in vendored deps and inflate scan time).
  */
-async function detectPypiName(projectPath: string): Promise<string | null> {
-  const pyproject = join(projectPath, 'pyproject.toml');
-  if (await fileExists(pyproject)) {
-    const text = await readText(pyproject);
-    if (text) {
-      const fromProject = tomlField(text, 'project', 'name');
-      if (fromProject) return normalizePypiName(fromProject);
-      // Older Poetry layout used [tool.poetry] before PEP 621 adoption.
-      const fromPoetry = tomlField(text, 'tool\\.poetry', 'name');
-      if (fromPoetry) return normalizePypiName(fromPoetry);
-    }
+async function detectPypiName(projectPath: string, _repoName: string): Promise<string | null> {
+  for (const candidate of await pyManifestCandidates(projectPath)) {
+    const text = await readText(candidate);
+    if (!text) continue;
+    const fromProject = tomlField(text, 'project', 'name');
+    if (fromProject) return normalizePypiName(fromProject);
+    // Older Poetry layout used [tool.poetry] before PEP 621 adoption.
+    const fromPoetry = tomlField(text, 'tool\\.poetry', 'name');
+    if (fromPoetry) return normalizePypiName(fromPoetry);
   }
   const setupPy = join(projectPath, 'setup.py');
   if (await fileExists(setupPy)) {
@@ -155,6 +163,35 @@ async function detectPypiName(projectPath: string): Promise<string | null> {
     }
   }
   return null;
+}
+
+/**
+ * Ordered candidate list for a `pyproject.toml` lookup. The order
+ * prioritises the canonical location at the repo root, then the most
+ * common polyglot layouts, before falling back to a one-level scan of
+ * `packages/`. Returning paths that may not exist is fine — caller
+ * already guards each read.
+ */
+async function pyManifestCandidates(projectPath: string): Promise<string[]> {
+  const out: string[] = [join(projectPath, 'pyproject.toml')];
+  for (const sub of ['pip', 'python', 'py']) {
+    out.push(join(projectPath, sub, 'pyproject.toml'));
+  }
+  const packagesDir = join(projectPath, 'packages');
+  for (const entry of await readdirSafe(packagesDir)) {
+    out.push(join(packagesDir, entry, 'pyproject.toml'));
+  }
+  return out;
+}
+
+/** Directory listing that returns [] on any error (missing dir, perm). */
+async function readdirSafe(dir: string): Promise<string[]> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
 }
 
 /** PyPI canonicalises names: lowercase, runs of `-_.` → single `-`. */
@@ -204,12 +241,119 @@ const pypiAdapter: RegistryAdapter = {
 
 // ────────── crates.io adapter ──────────
 
-async function detectCratesName(projectPath: string): Promise<string | null> {
+async function detectCratesName(projectPath: string, repoName: string): Promise<string | null> {
+  return detectCratesNameForRepo(projectPath, repoName);
+}
+
+/**
+ * Cargo crate detection. Two layouts to handle:
+ *   1. Single-crate repo: top-level Cargo.toml has `[package] name = …`.
+ *   2. Workspace: top-level Cargo.toml has `[workspace]` (no `[package]`),
+ *      and the actual published crates live in sub-dirs (typically
+ *      `crates/<name>/Cargo.toml`). One repo → multiple crates; we pick
+ *      the "best" one by heuristic since `package_downloads` keys on
+ *      `(registry, repo_name)` and only stores one.
+ *
+ * The optional `repoName` lets us prefer a sub-crate that matches the
+ * repo (or `<repo>-cli`), which is the convention for binary-distributing
+ * workspaces like mcp-wallfacer (publishes `mcp-wallfacer-cli` as the
+ * user-facing entry). When omitted, we fall back to alphabetical order.
+ */
+async function detectCratesNameForRepo(
+  projectPath: string,
+  repoName: string | null,
+): Promise<string | null> {
   const cargo = join(projectPath, 'Cargo.toml');
   if (!(await fileExists(cargo))) return null;
   const text = await readText(cargo);
   if (!text) return null;
-  return tomlField(text, 'package', 'name');
+
+  const direct = tomlField(text, 'package', 'name');
+  if (direct) return direct;
+
+  // No top-level package — check for a workspace and scan members.
+  if (!/\[workspace\]/m.test(text)) return null;
+
+  const subCrates = await collectWorkspaceCrates(projectPath, text);
+  if (subCrates.length === 0) return null;
+
+  return pickPrimaryCrate(subCrates, repoName);
+}
+
+/**
+ * Enumerate the crate names declared by a Cargo workspace. We honour
+ * the `[workspace] members = […]` list when present (handling literal
+ * paths and one-level globs like `crates/*`), then fall back to scanning
+ * common sub-dirs (`crates/`, `packages/`) so freshly-bootstrapped
+ * workspaces without an explicit members list still work.
+ */
+async function collectWorkspaceCrates(projectPath: string, rootToml: string): Promise<string[]> {
+  const memberPaths = extractWorkspaceMembers(rootToml);
+  const crateDirs = new Set<string>();
+
+  for (const member of memberPaths) {
+    if (member.endsWith('/*')) {
+      const baseDir = join(projectPath, member.slice(0, -2));
+      for (const sub of await readdirSafe(baseDir)) {
+        crateDirs.add(join(baseDir, sub));
+      }
+    } else {
+      crateDirs.add(join(projectPath, member));
+    }
+  }
+  // Belt-and-braces: even when members is set, also probe the
+  // conventional dirs in case the workspace lists paths via includes
+  // we don't model. Set semantics dedupe.
+  for (const conv of ['crates', 'packages']) {
+    const baseDir = join(projectPath, conv);
+    for (const sub of await readdirSafe(baseDir)) {
+      crateDirs.add(join(baseDir, sub));
+    }
+  }
+
+  const names: string[] = [];
+  for (const dir of crateDirs) {
+    const subToml = join(dir, 'Cargo.toml');
+    const text = await readText(subToml);
+    if (!text) continue;
+    const name = tomlField(text, 'package', 'name');
+    if (name) names.push(name);
+  }
+  return names.sort();
+}
+
+/**
+ * Parse the `members = [ "a", "b/*" ]` array out of a workspace's
+ * top-level Cargo.toml. We only need a flat string list — the TOML
+ * spec allows multi-line arrays, so a regex on the captured block is
+ * adequate without pulling in a TOML parser.
+ */
+function extractWorkspaceMembers(rootToml: string): string[] {
+  const block = /\[workspace\][^\[]*?members\s*=\s*\[([\s\S]*?)\]/m.exec(rootToml);
+  if (!block) return [];
+  const out: string[] = [];
+  for (const m of block[1].matchAll(/['"]([^'"\n]+)['"]/g)) {
+    out.push(m[1]);
+  }
+  return out;
+}
+
+/**
+ * Pick one crate to represent the repo. Preference order:
+ *   1. Exact repo-name match (rare in workspaces, but cheap to check).
+ *   2. `<repo>-cli` suffix — the de-facto convention for executable
+ *      crates in a multi-crate workspace.
+ *   3. First entry in alphabetical order — deterministic fallback.
+ */
+function pickPrimaryCrate(candidates: string[], repoName: string | null): string {
+  if (repoName) {
+    const lowerRepo = repoName.toLowerCase();
+    const exact = candidates.find((c) => c.toLowerCase() === lowerRepo);
+    if (exact) return exact;
+    const cli = candidates.find((c) => c.toLowerCase() === `${lowerRepo}-cli`);
+    if (cli) return cli;
+  }
+  return candidates[0];
 }
 
 type CratesPoint = {
@@ -269,7 +413,7 @@ const cratesAdapter: RegistryAdapter = {
 
 // ────────── RubyGems adapter ──────────
 
-async function detectRubyGemsName(projectPath: string): Promise<string | null> {
+async function detectRubyGemsName(projectPath: string, _repoName: string): Promise<string | null> {
   // RubyGems names live in <project>.gemspec or a single-line
   // `gem "<name>"` inside Gemfile (less reliable). Prefer the gemspec.
   const candidates = ['Gemfile', 'gemspec'];
@@ -337,14 +481,28 @@ function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-type RepoTarget = { name: string; localPath: string };
+type RepoTarget = { name: string; localPath: string | null };
 
 /**
- * Walk all GitHub repos that have a known local path (= they're also
- * scanned as projects), run every adapter against them, persist what
- * each one finds. Adapters are idempotent and TTL-respecting at the
- * point-count level; the daily range is upserted unconditionally
- * because registries occasionally backfill late.
+ * Walk every non-fork GitHub repo, run every adapter against it,
+ * persist what each one finds. Adapters are idempotent and
+ * TTL-respecting at the point-count level; the daily range is upserted
+ * unconditionally because registries occasionally backfill late.
+ *
+ * Resolution order for each (repo, registry) pair:
+ *   1. If we have a local checkout, ask the adapter to detect the
+ *      package name from manifests (pyproject.toml, Cargo.toml, …).
+ *   2. If detection fails OR there's no local clone, fall back to
+ *      hitting the registry with `repo.name` verbatim — most public
+ *      packages share their name with the GitHub repo, and this is
+ *      what shields.io effectively does. The adapter's `fetchPoint`
+ *      returning null tells us the guess was wrong.
+ *
+ * `displayAliases` (settings.displayAliases) lets the user bridge a
+ * GitHub repo name to a local project folder when the names diverge
+ * (e.g. local `Dashboard` ↔ GitHub `vibecode-dash`). Without this,
+ * detection would silently skip aliased projects because the JOIN on
+ * `projects.name = github_repos.name` misses.
  *
  * Returns per-registry summary so the caller can log + surface in the
  * sync events table.
@@ -352,25 +510,46 @@ type RepoTarget = { name: string; localPath: string };
 export async function refreshAllPackageDownloads(opts: {
   db: Database;
   force?: boolean;
+  displayAliases?: Record<string, string>;
 }): Promise<{
   byRegistry: Record<
     Registry,
     { detected: number; updated: number; notFound: number; errors: number }
   >;
 }> {
-  const { db, force = false } = opts;
+  const { db, force = false, displayAliases = {} } = opts;
 
-  // Source of truth for "where this repo lives on disk": the projects
-  // table. github_repos has a name but no path; we join on name.
-  const repos = db
-    .query<RepoTarget, []>(
-      `SELECT g.name AS name, p.path AS localPath
-         FROM github_repos g
-         JOIN projects p ON LOWER(p.name) = LOWER(g.name)
-        WHERE COALESCE(g.is_fork, 0) = 0
-        ORDER BY g.pushed_at DESC, g.name ASC`,
+  // Build a (case-insensitive) reverse map: GitHub-repo-name → local
+  // project path. We start from the projects table directly, then layer
+  // alias overrides on top so the alias path wins when both are
+  // populated (the alias is an explicit user assertion).
+  const projectByLowerName = new Map<string, string>();
+  for (const row of db
+    .query<{ name: string; path: string }, []>('SELECT name, path FROM projects')
+    .all()) {
+    projectByLowerName.set(row.name.toLowerCase(), row.path);
+  }
+  // displayAliases: { canonicalLocal → displayedAsRepo }. Reverse it so
+  // a github repo name lookup returns the canonical local path.
+  for (const [canonical, displayed] of Object.entries(displayAliases)) {
+    const localPath = projectByLowerName.get(canonical.toLowerCase());
+    if (localPath) projectByLowerName.set(displayed.toLowerCase(), localPath);
+  }
+
+  // LEFT JOIN-equivalent: every non-fork GitHub repo, with localPath
+  // set when we know it (direct match OR alias) and null otherwise.
+  // The orchestrator handles both branches below.
+  const repos: RepoTarget[] = db
+    .query<{ name: string }, []>(
+      `SELECT name FROM github_repos
+        WHERE COALESCE(is_fork, 0) = 0
+        ORDER BY pushed_at DESC, name ASC`,
     )
-    .all();
+    .all()
+    .map((r) => ({
+      name: r.name,
+      localPath: projectByLowerName.get(r.name.toLowerCase()) ?? null,
+    }));
 
   const summary: Record<
     Registry,
@@ -421,31 +600,51 @@ export async function refreshAllPackageDownloads(opts: {
       if (!force && cachedTs > staleCutoff) continue;
 
       let pkgName: string | null = null;
-      try {
-        pkgName = await adapter.detectPackageName(repo.localPath);
-      } catch {
-        // Manifest read failure (perm denied, malformed file) — record
-        // as "not detected" so we don't retry every tick on a broken
-        // file. fetched_at advances so the TTL gates future attempts.
-        upsertPoint.run(adapter.registry, repo.name, null, 0, 0, 0, 1, nowSec());
-        summary[adapter.registry].errors += 1;
-        continue;
+      let pkgSource: 'manifest' | 'verbatim' = 'manifest';
+      if (repo.localPath) {
+        try {
+          pkgName = await adapter.detectPackageName(repo.localPath, repo.name);
+        } catch {
+          // Manifest read failure (perm denied, malformed file) — fall
+          // through to the verbatim probe rather than aborting; that
+          // way a broken pyproject.toml doesn't suppress the registry
+          // hit when the package name happens to match repo.name.
+          summary[adapter.registry].errors += 1;
+        }
       }
+      // Verbatim fallback: when we have no clone or the manifest didn't
+      // surface a name, try repo.name directly. The probe is gated on
+      // fetchPoint returning a non-null result, so wrong guesses just
+      // get marked not_found like before — no false positives.
       if (!pkgName) {
-        // Project isn't published on this registry. Mark not_found so
-        // the cache prevents re-scanning every 6 h.
-        upsertPoint.run(adapter.registry, repo.name, null, 0, 0, 0, 1, nowSec());
-        continue;
+        pkgName = repo.name;
+        pkgSource = 'verbatim';
       }
-      summary[adapter.registry].detected += 1;
 
       try {
         const point = await adapter.fetchPoint(pkgName);
         if (!point) {
-          upsertPoint.run(adapter.registry, repo.name, pkgName, 0, 0, 0, 1, nowSec());
+          // Mark not_found whether the guess came from a manifest (rare
+          // — the manifest said "this package", registry says no) or
+          // from the verbatim fallback (common — most repos aren't
+          // published on every registry). Either way the TTL gates the
+          // next retry, so we don't hammer the registry every 6 h.
+          // Persist null package_name on verbatim-miss so we don't lock
+          // in a wrong guess across restarts.
+          upsertPoint.run(
+            adapter.registry,
+            repo.name,
+            pkgSource === 'manifest' ? pkgName : null,
+            0,
+            0,
+            0,
+            1,
+            nowSec(),
+          );
           summary[adapter.registry].notFound += 1;
           continue;
         }
+        summary[adapter.registry].detected += 1;
         upsertPoint.run(
           adapter.registry,
           repo.name,
